@@ -126,7 +126,7 @@ module McpToolkit
         Faraday.new do |conn|
           conn.options.timeout = timeout
           conn.options.open_timeout = timeout
-          conn.response :json, content_type: %r{\bjson$}
+          conn.response :json, content_type: /\bjson$/
           conn.adapter Faraday.default_adapter
         end
       end

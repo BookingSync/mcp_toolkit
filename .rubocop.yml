@@ -1,0 +1,122 @@
+plugins:
+  - rubocop-performance
+  - rubocop-rspec
+
+AllCops:
+  TargetRubyVersion: 3.2
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - "bin/**/*"
+    - "vendor/**/*"
+    - "tmp/**/*"
+
+# --- Layout -----------------------------------------------------------------
+
+Layout/LineLength:
+  Max: 120
+
+# --- Style ------------------------------------------------------------------
+
+# The gem (gemspec, Gemfile, lib, specs) is written with double-quoted strings;
+# match that convention instead of churning every literal.
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+# This is a library; per-class/module YARD comments are not enforced.
+Style/Documentation:
+  Enabled: false
+
+# --- Naming -----------------------------------------------------------------
+
+# `has_one` / `has_many` are association-DSL names mirroring AMS / ActiveRecord;
+# they are not boolean predicates.
+Naming/PredicatePrefix:
+  AllowedMethods:
+    - has_one
+    - has_many
+
+# --- Metrics ----------------------------------------------------------------
+# The extracted framework intentionally carries some larger units (the transport
+# controller, the server wiring, the registry/executor dispatch). Bump the
+# metrics cops to fit the code as written rather than contorting it; keep them
+# enabled so genuinely runaway methods still get flagged.
+
+Metrics/MethodLength:
+  Max: 30
+
+Metrics/AbcSize:
+  Max: 30
+
+Metrics/CyclomaticComplexity:
+  Max: 12
+
+Metrics/PerceivedComplexity:
+  Max: 12
+
+Metrics/ClassLength:
+  Max: 250
+
+Metrics/ModuleLength:
+  Max: 250
+
+Metrics/BlockLength:
+  Max: 50
+  Exclude:
+    - "spec/**/*"
+    - "*.gemspec"
+    - "Gemfile"
+
+Metrics/ParameterLists:
+  Max: 6
+
+# --- Naming (specs) ---------------------------------------------------------
+
+# `id` is a domain-meaningful record identifier; fake-AR helpers mirror
+# ActiveRecord's `offset(n)` / `limit(n)` signatures.
+Naming/MethodParameterName:
+  AllowedNames:
+    - id
+    - n
+
+# Fixture identifiers like `:account_42` / id `42` are intentional, not magic
+# variable numbering to normalize.
+Naming/VariableNumber:
+  Exclude:
+    - "spec/**/*"
+
+# --- RSpec ------------------------------------------------------------------
+
+RSpec/ExampleLength:
+  Enabled: false
+
+RSpec/MultipleExpectations:
+  Enabled: false
+
+RSpec/NestedGroups:
+  Max: 5
+
+RSpec/MultipleMemoizedHelpers:
+  Enabled: false
+
+# Integration-style specs (data path, server end-to-end) intentionally describe
+# a behaviour with a string rather than a single class.
+RSpec/DescribeClass:
+  Exclude:
+    - "spec/mcp_toolkit/registry_and_executors_spec.rb"
+    - "spec/mcp_toolkit/server_end_to_end_spec.rb"
+
+# `@touched` lives on a test-double class defined inside the example, not on the
+# example scope; the cop misreads it as an example ivar.
+RSpec/InstanceVariable:
+  Exclude:
+    - "spec/mcp_toolkit/auth_spec.rb"
+
+# Asserting on a slid-TTL `write` is naturally expressed as a message
+# expectation here.
+RSpec/MessageSpies:
+  Exclude:
+    - "spec/mcp_toolkit/session_spec.rb"

@@ -34,7 +34,9 @@ module McpToolkit
     # `serialize_collection` (see McpToolkit::Serializer::Base for the contract).
     #
     # @return [Class]
-    attr_accessor :serializer_base
+    # The reader is defined below as a lazily-defaulting method; only the writer
+    # comes from here.
+    attr_writer :serializer_base
 
     # --- auth: role ------------------------------------------------------------
 

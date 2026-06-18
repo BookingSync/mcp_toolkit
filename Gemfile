@@ -12,3 +12,10 @@ gem "rspec", "~> 3.0"
 
 # Used by the auth specs to stub the central app's introspection endpoint.
 gem "webmock", "~> 3.0"
+
+# Linting, static analysis, and security scanning. `require: false` so they load
+# only via their CLIs / Rake tasks, never into the gem's runtime.
+gem "brakeman", require: false
+gem "rubocop", require: false
+gem "rubocop-performance", require: false
+gem "rubocop-rspec", require: false

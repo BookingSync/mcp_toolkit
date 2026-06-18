@@ -48,6 +48,7 @@ RSpec.describe "Registry + executors + serializer (data path)" do
   end
 
   let(:relation) { FakeRelation.new(rows, table_name: "widgets") }
+  let(:resource) { McpToolkit.registry.fetch("widgets") }
 
   before do
     serializer = widget_serializer
@@ -63,8 +64,6 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       end
     end
   end
-
-  let(:resource) { McpToolkit.registry.fetch("widgets") }
 
   describe McpToolkit::ListExecutor do
     it "returns the collection wrapper keyed by the plural root with pagination meta" do

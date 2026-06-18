@@ -47,7 +47,7 @@ module McpToolkit
 
         unless introspection.authorized_for_application?(@config.required_application)
           raise McpToolkit::Errors::Unauthorized,
-            "token is not authorized for the #{@config.required_application.inspect} application"
+                "token is not authorized for the #{@config.required_application.inspect} application"
         end
 
         central_account_id = resolve_account_id(introspection)
@@ -68,7 +68,7 @@ module McpToolkit
           bound = introspection.account_id
           if candidate.present? && candidate.to_i != bound.to_i
             raise McpToolkit::Errors::Unauthorized,
-              "account_id #{candidate} does not match this token's bound account"
+                  "account_id #{candidate} does not match this token's bound account"
           end
 
           return bound
@@ -77,8 +77,8 @@ module McpToolkit
         # superuser / multi-account: selection is mandatory and must be authorized.
         if candidate.blank?
           raise McpToolkit::Errors::Unauthorized,
-            "this token spans multiple accounts; an account must be selected " \
-              "via _meta[\"#{@config.account_meta_key}\"] (or the account_id argument)"
+                "this token spans multiple accounts; an account must be selected " \
+                "via _meta[\"#{@config.account_meta_key}\"] (or the account_id argument)"
         end
 
         unless introspection.authorized_account_ids.include?(candidate.to_i)

@@ -48,7 +48,7 @@ module McpToolkit
           filter: {
             type: "object",
             description: "Per-attribute exact-match equality filters, e.g. { \"booking_id\": 42 }. " \
-              "See a resource's `resource_schema` `filters` for the keys it accepts.",
+                         "See a resource's `resource_schema` `filters` for the keys it accepts.",
             additionalProperties: true
           },
           limit: { type: "integer", description: "Page size (default 25, max 100)" },

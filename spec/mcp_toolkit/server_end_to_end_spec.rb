@@ -94,7 +94,7 @@ RSpec.describe "Server end-to-end (tools/call)" do
     response = call_tool({ "resource" => "widgets" })
 
     expect(response.dig("result", "isError")).to be(true)
-    expect(response.dig("result", "content", 0, "text")).to match(/Unauthorized/)
+    expect(response.dig("result", "content", 0, "text")).to include("Unauthorized")
   end
 
   it "lists the four generic tools" do

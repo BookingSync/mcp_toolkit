@@ -17,7 +17,7 @@ RSpec.describe "Authentication" do
     end
   end
 
-  def stub_introspect(token:, status: 200, body:)
+  def stub_introspect(token:, body:, status: 200)
     stub_request(:post, introspect_endpoint)
       .with(headers: { "Authorization" => "Bearer #{token}" })
       .to_return(status:, body: JSON.generate(body), headers: { "Content-Type" => "application/json" })
@@ -117,7 +117,8 @@ RSpec.describe "Authentication" do
     it "rejects when no local scope maps to the resolved account" do
       stub_introspect(
         token: "no_local",
-        body: { valid: true, kind: "accounts_user", account_id: 999, account_ids: [999], applications: ["notifications"] }
+        body: { valid: true, kind: "accounts_user", account_id: 999, account_ids: [999],
+                applications: ["notifications"] }
       )
 
       expect { described_class.call(token: "no_local") }

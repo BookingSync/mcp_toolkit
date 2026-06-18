@@ -18,9 +18,9 @@ module McpToolkit
       @resources = {}
     end
 
-    def register(name, &block)
+    def register(name, &)
       resource = McpToolkit::Resource.new(name)
-      resource.instance_eval(&block)
+      resource.instance_eval(&)
       @resources[name.to_s] = resource
     end
 

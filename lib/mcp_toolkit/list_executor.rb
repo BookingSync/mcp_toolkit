@@ -72,8 +72,8 @@ module McpToolkit
 
       allowed = mapping.keys.sort.join(", ")
       raise McpToolkit::Errors::InvalidParams,
-        "unknown filter attribute(s): #{unknown.join(", ")}. " \
-          "Filterable attributes for this resource: #{allowed.presence || "(none)"}"
+            "unknown filter attribute(s): #{unknown.join(", ")}. " \
+            "Filterable attributes for this resource: #{allowed.presence || "(none)"}"
     end
 
     def apply_ids(relation)

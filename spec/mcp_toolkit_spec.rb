@@ -8,7 +8,7 @@ RSpec.describe McpToolkit do
   end
 
   it "exposes MCPToolkit as an alias of McpToolkit" do
-    expect(MCPToolkit).to equal(McpToolkit)
+    expect(MCPToolkit).to equal(described_class)
   end
 
   describe ".configure" do

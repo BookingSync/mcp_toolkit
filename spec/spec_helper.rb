@@ -6,7 +6,7 @@ require "webmock/rspec"
 # Block all real HTTP; auth specs stub the central app's introspection endpoint.
 WebMock.disable_net_connect!
 
-Dir[File.join(__dir__, "support", "**", "*.rb")].sort.each { |f| require f }
+Dir[File.join(__dir__, "support", "**", "*.rb")].each { |f| require f }
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure

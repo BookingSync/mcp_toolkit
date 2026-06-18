@@ -35,7 +35,7 @@ module McpToolkit
         authenticator = config.token_authenticator
         if authenticator.nil?
           raise McpToolkit::Errors::ConfigurationError,
-            "token_authenticator is not configured; required for the :authority role"
+                "token_authenticator is not configured; required for the :authority role"
         end
 
         token = authenticator.call(plaintext)

@@ -74,7 +74,6 @@ module McpToolkit
         # `<name>_id` convention - e.g.
         # `has_one :account, foreign_key: :synced_account_id` so the link reports
         # the central account id straight off the already-loaded column.
-        # rubocop:disable Naming/PredicatePrefix, Metrics/ParameterLists -- DSL mirrors AMS interface
         def has_one(name, key: nil, root: nil, serializer: nil, polymorphic: false, foreign_key: nil)
           declared_associations << Association.new(
             name: name.to_sym, type: :has_one, key: key || root, serializer:, polymorphic:, foreign_key:
@@ -87,7 +86,6 @@ module McpToolkit
             name: name.to_sym, type: :has_many, key: key || root, serializer:, polymorphic: false
           )
         end
-        # rubocop:enable Naming/PredicatePrefix, Metrics/ParameterLists
 
         # Declares attributes whose value is a `{ locale => translation }` hash.
         # An instance method is defined for each attribute that delegates to
@@ -171,7 +169,7 @@ module McpToolkit
         hash["links"] = links
         hash
       end
-      alias_method :as_json, :serializable_hash
+      alias as_json serializable_hash
 
       private
 

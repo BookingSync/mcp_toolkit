@@ -44,7 +44,10 @@ module McpToolkit
         tools: GENERIC_TOOLS + Array(extra_tools),
         server_context: context
       }
-      kwargs[:configuration] = MCP::Configuration.new(protocol_version: config.protocol_version) if config.protocol_version
+      if config.protocol_version
+        kwargs[:configuration] =
+          MCP::Configuration.new(protocol_version: config.protocol_version)
+      end
 
       MCP::Server.new(**kwargs)
     end
