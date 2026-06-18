@@ -20,7 +20,7 @@ module McpToolkit
     #     #      meta: { total_count:, limit:, offset: } }
     #
     # ANY class implementing those two methods can be registered as a resource's
-    # serializer — that is the seam that lets BookingSync's API-v3 /
+    # serializer — that is the seam that lets an app's existing API- or
     # Prometheus-derived serializers slot in unchanged alongside this base. The
     # `resource_schema` tool additionally reads `declared_attributes` and
     # `declared_associations` off the serializer (for shape discovery); a custom

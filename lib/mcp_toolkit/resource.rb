@@ -13,7 +13,7 @@ module McpToolkit
   #
   # The `serializer` is INJECTABLE per resource: it may be a subclass of the gem's
   # `McpToolkit::Serializer::Base`, or any class satisfying the serializer contract
-  # (`serialize_one` / `serialize_collection`) — e.g. a BookingSync API-v3 /
+  # (`serialize_one` / `serialize_collection`) — e.g. an existing API- or
   # Prometheus-derived serializer.
   class Resource
     class NotConfigured < StandardError; end

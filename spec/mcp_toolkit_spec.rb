@@ -27,10 +27,10 @@ RSpec.describe McpToolkit do
   describe ".config defaults" do
     subject(:config) { described_class.config }
 
-    it "ships opinionated defaults matching the two source apps" do
+    it "ships opinionated, vendor-neutral defaults" do
       expect(config.introspect_path).to eq("/mcp/tokens/introspect")
-      expect(config.account_meta_key).to eq("bookingsync.com/account-id")
-      expect(config.account_id_header).to eq("X-BookingSync-Account-ID")
+      expect(config.account_meta_key).to eq("mcp-toolkit/account-id")
+      expect(config.account_id_header).to eq("X-MCP-Account-ID")
       expect(config.session_ttl).to eq(3600)
       expect(config.serializer_base).to eq(McpToolkit::Serializer::Base)
     end

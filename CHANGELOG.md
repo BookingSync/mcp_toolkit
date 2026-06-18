@@ -2,9 +2,8 @@
 
 ## [0.1.0] - 2026-06-18
 
-Initial extraction from the two independently-grown Smily MCP servers
-(`bsa-notifications`, `BookingSync`). Standardizes on the official `mcp` gem
-(`~> 0.18`) as the wrapped JSON-RPC core.
+Initial extraction from two independently-grown internal MCP servers.
+Standardizes on the official `mcp` gem (`~> 0.18`) as the wrapped JSON-RPC core.
 
 ### Added
 

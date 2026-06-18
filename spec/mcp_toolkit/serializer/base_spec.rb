@@ -76,7 +76,7 @@ RSpec.describe McpToolkit::Serializer::Base do
 
   describe "injection: a custom serializer satisfying only the contract" do
     # A serializer that is NOT a subclass of Base — it only implements the two
-    # contract methods. Stands in for a BookingSync API-v3 / Prometheus-derived
+    # contract methods. Stands in for an existing API- or Prometheus-derived
     # serializer. The executor must work with it unchanged.
     let(:custom_serializer) do
       Class.new do

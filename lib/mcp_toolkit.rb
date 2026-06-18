@@ -56,7 +56,7 @@ module McpToolkit
     #
     #   McpToolkit.configure do |c|
     #     c.server_name = "my-app-mcp"
-    #     c.central_app_url = ENV.fetch("BOOKINGSYNC_URL")
+    #     c.central_app_url = ENV.fetch("MCP_CENTRAL_APP_URL")
     #     c.required_application = "my_app"
     #   end
     def configure

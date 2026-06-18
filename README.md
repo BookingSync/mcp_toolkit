@@ -3,9 +3,9 @@
 An opinionated toolkit for building **account-scoped, read-only MCP servers** on
 top of the official [`mcp`](https://rubygems.org/gems/mcp) gem.
 
-It extracts the shared MCP-server framework that Smily's apps grew independently
-(`bsa-notifications`, `BookingSync`) into one versioned, standalone library, so a
-new app can add an MCP server in ~20 lines. It ships:
+It extracts the shared MCP-server framework that several apps grew independently
+into one versioned, standalone library, so a new app can add an MCP server in
+~20 lines. It ships:
 
 - a **Streamable-HTTP transport** (POST/GET/DELETE/health, SSE-on-`Accept`,
   `202`-for-notifications) as an includable controller concern;
@@ -17,8 +17,8 @@ new app can add an MCP server in ~20 lines. It ships:
 - a registry-driven **"generic tools over N resources"** dispatcher
   (`list` / `get` / `resources` / `resource_schema`) wrapping the official `mcp`
   gem's JSON-RPC core;
-- an **injectable serializer DSL** (the default base, or your own — e.g. a
-  BookingSync API-v3 / Prometheus-derived serializer).
+- an **injectable serializer DSL** (the default base, or your own — e.g. an
+  existing API- or Prometheus-derived serializer).
 
 The JSON-RPC protocol, version negotiation, and error envelopes are delegated to
 the official `mcp` gem; this toolkit owns everything around it.
@@ -36,9 +36,9 @@ bundle install
 
 ## Concepts
 
-A typical topology is **one central app** responsible for auth (e.g. BookingSync)
-and **N satellites** that expose their own resources and validate forwarded tokens
-by introspecting against the central app. `mcp_toolkit` makes both roles trivial.
+A typical topology is **one central app** responsible for auth and **N
+satellites** that expose their own resources and validate forwarded tokens by
+introspecting against the central app. `mcp_toolkit` makes both roles trivial.
 
 Everything is driven by a single config object:
 
@@ -66,8 +66,8 @@ McpToolkit.configure do |c|
 
   # --- satellite auth ---
   c.auth_role            = :satellite
-  c.central_app_url      = ENV.fetch("BOOKINGSYNC_URL")  # POSTs <url>/mcp/tokens/introspect
-  c.required_application  = "notifications"               # token must be scoped to this app
+  c.central_app_url      = ENV.fetch("MCP_CENTRAL_APP_URL") # POSTs <url>/mcp/tokens/introspect
+  c.required_application  = "notifications"                 # token must be scoped to this app
 
   # Map the central account id to this app's LOCAL scope root (an Account here).
   c.account_resolver = ->(synced_account_id) { Account.find_by(synced_id: synced_account_id) }
@@ -143,7 +143,7 @@ end
 The token object your authenticator returns must respond to:
 `kind` (`:accounts_user` | `:user`), `account_id`, `account_ids`, `expires_at`
 (an `#iso8601`-able time or nil), and `application_keys` (`[]` = unrestricted).
-Optionally `touch_last_used!`. This is exactly BookingSync's `McpToken` interface.
+Optionally `touch_last_used!`. A typical app token model (e.g. `McpToken`) fits.
 
 **2. Expose the introspection endpoint** the satellites call:
 
@@ -194,8 +194,8 @@ serializer.serialize_collection(records, scope:, total_count:, limit:, offset:)
   # => { <root_key> => [ <record_hash>, ... ], meta: { total_count:, limit:, offset: } }
 ```
 
-Any class satisfying that contract slots in — including BookingSync's
-API-v3 / Prometheus-derived serializers. Register it directly:
+Any class satisfying that contract slots in — including an app's existing
+API- or Prometheus-derived serializers. Register it directly:
 
 ```ruby
 McpToolkit.registry.register(:bookings) do
@@ -243,8 +243,8 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `cache_store` | `MemoryStore` | sessions + introspection cache (set to `Rails.cache`) |
 | `session_ttl` | `3600` | session sliding TTL (s) |
 | `protocol_version` | `nil` (negotiate) | pin an MCP protocol version |
-| `account_meta_key` | `"bookingsync.com/account-id"` | `_meta` key a superuser uses to pin the account |
-| `account_id_header` | `"X-BookingSync-Account-ID"` | header fallback for the account selector |
+| `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
+| `account_id_header` | `"X-MCP-Account-ID"` | header fallback for the account selector |
 
 ## Public API surface
 
@@ -264,7 +264,7 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 
 ## Scope (what's intentionally NOT here)
 
-The gateway / upstream-aggregation layer (`Mcp::Upstreams*` in BookingSync) is
+The gateway / upstream-aggregation layer (a central app's `Mcp::Upstreams*`) is
 **out of scope** — it's core-only and ships to no satellite. This toolkit is for
 servers that expose tools, not for aggregating other servers.
 

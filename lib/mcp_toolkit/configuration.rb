@@ -5,9 +5,9 @@ require "active_support/cache"
 module McpToolkit
   # The single, injectable configuration object for an app's MCP server.
   #
-  # Generic but OPINIONATED: every setting has a default that matches exactly how
-  # bsa-notifications / BookingSync already work, so a satellite needs to override
-  # only a handful of values. The two things an app almost always sets are
+  # Generic but OPINIONATED: every setting has a sensible, vendor-neutral default,
+  # so a satellite needs to override only a handful of values. The two things an
+  # app almost always sets are
   # `server_name` and the auth wiring (`central_app_url` + `required_application`
   # for a satellite, or `token_authenticator` for the authority).
   #
@@ -28,8 +28,9 @@ module McpToolkit
     # The DEFAULT serializer base class. A `Resource` registration that does not
     # supply its own `serializer` inherits nothing here — serializers are picked
     # per-resource — but this is the class the gem ships and documents as the base
-    # to subclass. Apps that want BookingSync's API-v3 / Prometheus-derived
-    # serializers simply register resources with those classes instead; the gem
+    # to subclass. Apps that want their own existing serializers (e.g. an API- or
+    # Prometheus-derived serializer) simply register resources with those classes
+    # instead; the gem
     # only requires that a serializer responds to `serialize_one` /
     # `serialize_collection` (see McpToolkit::Serializer::Base for the contract).
     #
@@ -48,7 +49,7 @@ module McpToolkit
 
     # --- auth: satellite side --------------------------------------------------
 
-    # @return [String, nil] base URL of the central auth app (e.g. BookingSync).
+    # @return [String, nil] base URL of the central auth app.
     #   The satellite POSTs `<central_app_url>/mcp/tokens/introspect`.
     attr_accessor :central_app_url
     # @return [String, nil] the introspect path appended to `central_app_url`.
@@ -116,9 +117,10 @@ module McpToolkit
     #   nil lets the gem negotiate (recommended). Set only to force an older spec.
     attr_accessor :protocol_version
 
-    # Header / meta-key constants. Generic defaults match both apps; an app on a
-    # different central authority can rename them. These are the selectors a
-    # superuser/multi-account token uses to pin the active account.
+    # Header / meta-key constants. Vendor-neutral defaults; an app on a specific
+    # central authority can rename them to match that authority's convention.
+    # These are the selectors a superuser/multi-account token uses to pin the
+    # active account.
     #
     # @return [String]
     attr_accessor :account_meta_key
@@ -133,7 +135,7 @@ module McpToolkit
     # @return [McpToolkit::Registry]
     attr_accessor :registry
 
-    # Defaults mirror exactly how bsa-notifications + BookingSync are wired today.
+    # Vendor-neutral defaults; apps override the auth wiring + identity as needed.
     def initialize
       @server_name = "mcp-server"
       @server_version = "1.0.0"
@@ -155,8 +157,8 @@ module McpToolkit
       @session_ttl = 3600 # 1 hour
 
       @protocol_version = nil
-      @account_meta_key = "bookingsync.com/account-id"
-      @account_id_header = "X-BookingSync-Account-ID"
+      @account_meta_key = "mcp-toolkit/account-id"
+      @account_id_header = "X-MCP-Account-ID"
 
       @registry = McpToolkit::Registry.new
     end

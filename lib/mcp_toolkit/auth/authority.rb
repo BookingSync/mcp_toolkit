@@ -2,9 +2,9 @@
 
 module McpToolkit
   module Auth
-    # AUTHORITY side. The helpers the central app (BookingSync) uses to (a)
-    # authenticate a plaintext bearer token against its local token store and (b)
-    # answer the introspection request satellites send.
+    # AUTHORITY side. The helpers the central app uses to (a) authenticate a
+    # plaintext bearer token against its local token store and (b) answer the
+    # introspection request satellites send.
     #
     # Both are thin and config-driven: the actual token lookup is the app's
     # `config.token_authenticator` callable (its `McpToken.authenticate`
@@ -24,7 +24,7 @@ module McpToolkit
     #   #application_keys -> Array of application keys the token is scoped to ([] = unrestricted)
     #
     # Optionally `#touch_last_used!` (called after a successful authenticate if
-    # present). This is exactly BookingSync's `McpToken` interface.
+    # present). A typical app token model (e.g. `McpToken`) satisfies this.
     module Authority
       module_function
 
