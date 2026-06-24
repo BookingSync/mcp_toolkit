@@ -30,7 +30,7 @@ RSpec.describe "Authentication" do
       stub_introspect(
         token: "good",
         body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42],
-                expires_at: nil, applications: ["notifications"] }
+                expires_at: nil, scopes: ["notifications_read"] }
       )
 
       result = described_class.call("good")
@@ -38,7 +38,46 @@ RSpec.describe "Authentication" do
       expect(result).to be_valid
       expect(result).to be_accounts_user
       expect(result.account_id).to eq(42)
+      expect(result.scopes).to eq(["notifications_read"])
       expect(result.authorized_for_application?("notifications")).to be(true)
+      expect(result.authorized_for_scope?("notifications_read")).to be(true)
+    end
+
+    it "derives app-reach and per-scope authorization from scopes" do
+      stub_introspect(
+        token: "scoped",
+        body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42],
+                expires_at: nil, scopes: ["notifications_read"] }
+      )
+
+      result = described_class.call("scoped")
+
+      # app-reach: has a notifications_* scope -> reaches the app
+      expect(result.authorized_for_application?("notifications")).to be(true)
+      # but no scope for another app
+      expect(result.authorized_for_application?("billing")).to be(false)
+      # exact scope present / absent
+      expect(result.authorized_for_scope?("notifications_read")).to be(true)
+      expect(result.authorized_for_scope?("notifications_write")).to be(false)
+    end
+
+    it "treats empty/absent token scopes as unrestricted (backward-compat)" do
+      stub_introspect(
+        token: "unrestricted",
+        body: { valid: true, kind: "user", account_id: nil, account_ids: [1], expires_at: nil, scopes: [] }
+      )
+
+      result = described_class.call("unrestricted")
+
+      expect(result.authorized_for_application?("anything")).to be(true)
+      expect(result.authorized_for_scope?("anything_read")).to be(true)
+    end
+
+    it "treats an empty required scope as authorized" do
+      result = McpToolkit::Auth::Introspection::Result.new(valid: true, scopes: ["notifications_read"])
+
+      expect(result.authorized_for_scope?("")).to be(true)
+      expect(result.authorized_for_scope?(nil)).to be(true)
     end
 
     it "returns INVALID on a 401 from the central app" do
@@ -62,7 +101,7 @@ RSpec.describe "Authentication" do
       McpToolkit.config.introspection_cache_ttl = 60
       stub = stub_introspect(
         token: "cached",
-        body: { valid: true, kind: "user", account_id: nil, account_ids: [1, 2], applications: ["notifications"] }
+        body: { valid: true, kind: "user", account_id: nil, account_ids: [1, 2], scopes: ["notifications_read"] }
       )
 
       3.times { described_class.call("cached") }
@@ -77,7 +116,7 @@ RSpec.describe "Authentication" do
     it "resolves an accounts_user token to its bound, locally-mapped scope root" do
       stub_introspect(
         token: "au",
-        body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], applications: ["notifications"] }
+        body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: ["notifications_read"] }
       )
 
       context = described_class.call(token: "au")
@@ -88,7 +127,7 @@ RSpec.describe "Authentication" do
     it "rejects a token not scoped to the required application" do
       stub_introspect(
         token: "wrong_app",
-        body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], applications: ["other"] }
+        body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: ["other_read"] }
       )
 
       expect { described_class.call(token: "wrong_app") }
@@ -98,7 +137,7 @@ RSpec.describe "Authentication" do
     it "requires a superuser token to select an authorized account" do
       stub_introspect(
         token: "su",
-        body: { valid: true, kind: "user", account_id: nil, account_ids: [42, 99], applications: ["notifications"] }
+        body: { valid: true, kind: "user", account_id: nil, account_ids: [42, 99], scopes: ["notifications_read"] }
       )
 
       # No selector -> rejected
@@ -118,7 +157,7 @@ RSpec.describe "Authentication" do
       stub_introspect(
         token: "no_local",
         body: { valid: true, kind: "accounts_user", account_id: 999, account_ids: [999],
-                applications: ["notifications"] }
+                scopes: ["notifications_read"] }
       )
 
       expect { described_class.call(token: "no_local") }
@@ -129,7 +168,7 @@ RSpec.describe "Authentication" do
   describe McpToolkit::Auth::Authority do
     # A token object matching the documented duck-typed contract.
     let(:token_class) do
-      Struct.new(:kind, :account_id, :account_ids, :expires_at, :application_keys, keyword_init: true) do
+      Struct.new(:kind, :account_id, :account_ids, :expires_at, :application_keys, :scopes, keyword_init: true) do
         def touch_last_used!
           @touched = true
         end
@@ -142,7 +181,7 @@ RSpec.describe "Authentication" do
 
     it "authenticates a plaintext token via the configured authenticator and touches last-used" do
       token = token_class.new(kind: :accounts_user, account_id: 42, account_ids: [42],
-                              expires_at: nil, application_keys: ["notifications"])
+                              expires_at: nil, application_keys: ["notifications"], scopes: ["notifications_read"])
       McpToolkit.configure do |c|
         c.auth_role = :authority
         c.token_authenticator = ->(plaintext) { plaintext == "secret" ? token : nil }
@@ -163,7 +202,8 @@ RSpec.describe "Authentication" do
 
     it "builds the exact introspection payload the satellite parses (accounts_user)" do
       token = token_class.new(kind: :accounts_user, account_id: 42, account_ids: [42],
-                              expires_at: Time.utc(2026, 12, 31), application_keys: ["notifications"])
+                              expires_at: Time.utc(2026, 12, 31), application_keys: ["notifications"],
+                              scopes: ["notifications_read"])
 
       payload = described_class.introspection_payload(token)
 
@@ -173,24 +213,36 @@ RSpec.describe "Authentication" do
         account_id: 42,
         account_ids: [42],
         expires_at: "2026-12-31T00:00:00Z",
-        applications: ["notifications"]
+        applications: ["notifications"],
+        scopes: ["notifications_read"]
       )
     end
 
     it "nulls account_id for a superuser/multi-account token" do
       token = token_class.new(kind: :user, account_id: nil, account_ids: [1, 2],
-                              expires_at: nil, application_keys: [])
+                              expires_at: nil, application_keys: [], scopes: [])
 
       payload = described_class.introspection_payload(token)
 
       expect(payload[:kind]).to eq("user")
       expect(payload[:account_id]).to be_nil
       expect(payload[:account_ids]).to eq([1, 2])
+      expect(payload[:scopes]).to eq([])
+    end
+
+    it "emits scopes: [] when the token object does not expose #scopes (optional contract)" do
+      legacy_token = Struct.new(:kind, :account_id, :account_ids, :expires_at, :application_keys, keyword_init: true)
+                           .new(kind: :accounts_user, account_id: 42, account_ids: [42],
+                                expires_at: nil, application_keys: ["notifications"])
+
+      payload = described_class.introspection_payload(legacy_token)
+
+      expect(payload[:scopes]).to eq([])
     end
 
     it "round-trips: an authority payload is consumed by the satellite Introspection parser" do
       token = token_class.new(kind: :accounts_user, account_id: 42, account_ids: [42],
-                              expires_at: nil, application_keys: ["notifications"])
+                              expires_at: nil, application_keys: ["notifications"], scopes: ["notifications_read"])
       payload = described_class.introspection_payload(token)
 
       configure_satellite!

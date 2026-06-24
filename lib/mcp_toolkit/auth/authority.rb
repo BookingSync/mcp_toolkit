@@ -22,6 +22,9 @@ module McpToolkit
     #   #account_ids     -> Array of authorized account ids
     #   #expires_at      -> a Time/DateTime responding to #iso8601, or nil
     #   #application_keys -> Array of application keys the token is scoped to ([] = unrestricted)
+    #   #scopes          -> Array of OAuth-style `<app>_<action>` scopes ([] = unrestricted).
+    #                       Optional; absent => emitted as []. Replaces application_keys
+    #                       as the authorization source on the satellite side.
     #
     # Optionally `#touch_last_used!` (called after a successful authenticate if
     # present). A typical app token model (e.g. `McpToken`) satisfies this.
@@ -59,7 +62,8 @@ module McpToolkit
           account_id: account_id_for(token, account_ids),
           account_ids:,
           expires_at: token.expires_at&.iso8601,
-          applications: Array(token.application_keys)
+          applications: Array(token.application_keys),
+          scopes: (token.respond_to?(:scopes) ? Array(token.scopes) : [])
         }
       end
 

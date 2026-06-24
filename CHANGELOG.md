@@ -1,5 +1,28 @@
 ## [Unreleased]
 
+### Added
+
+- OAuth-style **scope** enforcement. Tokens now carry `scopes` of the form
+  `<app>_<action>` (e.g. `notifications_read`). Every tool call requires the exact
+  `"#{required_application}_#{scope_action}"` scope; a token lacking it is rejected
+  with an `isError` result. NULL/empty token scopes remain unrestricted
+  (backward-compat).
+- `scope_action` class-level DSL on `Tools::Base` (defaults to `:read`, inherited
+  by subclasses). A write tool declares `scope_action :write`. The generic tools
+  (`list`, `get`, `resources`, `resource_schema`) are all reads.
+- `Auth::Introspection::Result#authorized_for_scope?(required_scope)` — exact-scope
+  check; `#authorized_for_application?` now derives app-reach from `scopes` instead
+  of `applications`.
+- New `scopes` field in the introspection contract: parsed by the satellite
+  (`Auth::Introspection`) and emitted by the authority (`Auth::Authority#introspection_payload`,
+  reading `token.scopes` when present, else `[]`).
+
+### Changed
+
+- Authorization now derives from `scopes`, not `applications`. The `applications`
+  field is retained in the payload for backward-compat but is no longer used for
+  auth.
+
 ## [0.1.0] - 2026-06-18
 
 Initial extraction from two independently-grown internal MCP servers.

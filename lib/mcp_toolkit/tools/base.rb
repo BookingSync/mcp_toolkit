@@ -21,6 +21,15 @@ module McpToolkit
     # Extracted from bsa-notifications' `McpServer::Tools::Base`.
     class Base < MCP::Tool
       class << self
+        # The OAuth-style action this tool requires, combined with the configured
+        # `required_application` into the `<app>_<action>` scope a token must carry
+        # (e.g. `notifications_read`). Defaults to `:read`; inherited by subclasses.
+        # A write tool would declare `scope_action :write`.
+        def scope_action(action = nil)
+          @scope_action = action.to_sym if action
+          @scope_action || :read
+        end
+
         # Runs `block` with an authenticated, scoped context, serializing any
         # McpToolkit::Errors into a clean text tool error.
         #
@@ -39,6 +48,11 @@ module McpToolkit
             header_account_id: server_context[:header_account_id],
             config:
           )
+
+          required_scope = "#{config.required_application}_#{scope_action}"
+          unless context.introspection.authorized_for_scope?(required_scope)
+            return error_response("Unauthorized: token lacks the #{required_scope.inspect} scope")
+          end
 
           text_response(yield(context.scope_root))
         rescue McpToolkit::Errors::Unauthorized => e
@@ -60,6 +74,11 @@ module McpToolkit
             return error_response(
               "Unauthorized: token is not authorized for the #{config.required_application.inspect} application"
             )
+          end
+
+          required_scope = "#{config.required_application}_#{scope_action}"
+          unless introspection.authorized_for_scope?(required_scope)
+            return error_response("Unauthorized: token lacks the #{required_scope.inspect} scope")
           end
 
           text_response(yield)
