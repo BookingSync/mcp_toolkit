@@ -18,6 +18,19 @@ Layout/LineLength:
 
 # --- Style ------------------------------------------------------------------
 
+# Prefer FLAT (compact) leaf declarations — `class McpToolkit::Auth::Authenticator`
+# — over the `module ... module ... class` pyramid. Files that genuinely define
+# several constants under one namespace (so the namespace must be opened as a
+# block) are excluded; there compact is not expressible.
+Style/ClassAndModuleChildren:
+  EnforcedStyle: compact
+  Exclude:
+    - "lib/mcp_toolkit.rb"
+    - "lib/mcp_toolkit/errors.rb"
+    - "lib/mcp_toolkit/filtering.rb"
+    - "lib/mcp_toolkit/serializer/base.rb"
+    - "lib/mcp_toolkit/tools/base.rb"
+
 # The gem (gemspec, Gemfile, lib, specs) is written with double-quoted strings;
 # match that convention instead of churning every literal.
 Style/StringLiterals:

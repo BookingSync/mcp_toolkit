@@ -2,10 +2,9 @@
 
 module McpToolkit
   module Serializer
-    # The DEFAULT serializer base shipped by the toolkit, extracted from
-    # bsa-notifications' `Mcp::BaseSerializer`. A self-contained re-implementation
-    # of the subset of an AMS-style serializer the MCP wire format depends on, with
-    # NO dependency on `active_model_serializers` / `fast_jsonapi`.
+    # The DEFAULT serializer base shipped by the toolkit. A self-contained
+    # implementation of the subset of an AMS-style serializer the MCP wire format
+    # depends on, with NO dependency on `active_model_serializers` / `fast_jsonapi`.
     #
     # ## The injection contract
     #

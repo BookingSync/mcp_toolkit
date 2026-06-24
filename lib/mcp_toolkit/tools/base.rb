@@ -17,8 +17,6 @@ module McpToolkit
     # McpToolkit config is also threaded in as `server_context[:mcp_config]` so a
     # process can, in principle, host more than one configured server; it falls back
     # to `McpToolkit.config`.
-    #
-    # Extracted from bsa-notifications' `McpServer::Tools::Base`.
     class Base < MCP::Tool
       class << self
         # The OAuth-style action this tool requires, combined with the configured
@@ -61,7 +59,7 @@ module McpToolkit
           error_response("Invalid request: #{e.message}")
         end
 
-        # Authenticates the token (valid + required-application scope) WITHOUT
+        # Authenticates the token (valid + required `<app>__<action>` scope) WITHOUT
         # requiring an account selection. Used by the schema-discovery tools, which
         # reveal shape, not tenant data, so a superuser shouldn't have to pin an
         # account just to discover what exists.
@@ -69,12 +67,6 @@ module McpToolkit
           config = config_from(server_context)
           introspection = McpToolkit::Auth::Introspection.call(server_context[:bearer_token], config:)
           return error_response("Unauthorized: invalid or expired token") unless introspection.valid?
-
-          unless introspection.authorized_for_application?(config.required_application)
-            return error_response(
-              "Unauthorized: token is not authorized for the #{config.required_application.inspect} application"
-            )
-          end
 
           required_scope = "#{config.required_application}__#{scope_action}"
           unless introspection.authorized_for_scope?(required_scope)

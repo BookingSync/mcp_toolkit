@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
-# ActiveSupport core extensions the extracted code relies on. Required up front
-# (not full Rails) so the gem works in any host: blank?/presence, deep_symbolize_keys,
+require "zeitwerk"
+
+# ActiveSupport core extensions the toolkit relies on. Required up front (not full
+# Rails) so the gem works in any host: blank?/presence, deep_symbolize_keys,
 # Array.wrap, compact_blank, iso8601 on Time/DateTime.
 require "active_support"
 require "active_support/core_ext/object/blank"
@@ -11,32 +13,15 @@ require "active_support/core_ext/enumerable" # compact_blank
 require "active_support/core_ext/time/conversions"
 require "active_support/core_ext/date_time/conversions"
 
+# The version constant is needed eagerly by the gemspec (before the loader is set
+# up), so it stays an explicit require rather than an autoload.
 require_relative "mcp_toolkit/version"
-require_relative "mcp_toolkit/errors"
 
-# Load order matters: Registry + Serializer::Base are referenced by Configuration
-# (the registry eagerly, the serializer base lazily).
-require_relative "mcp_toolkit/registry"
-require_relative "mcp_toolkit/resource"
-require_relative "mcp_toolkit/serializer/base"
-require_relative "mcp_toolkit/configuration"
-
-# Executors + schema (pure Ruby, no Rails needed to load).
-require_relative "mcp_toolkit/list_executor"
-require_relative "mcp_toolkit/get_executor"
-require_relative "mcp_toolkit/resource_schema"
-
-# Auth: satellite (introspection + authenticator) and authority.
-require_relative "mcp_toolkit/auth/introspection"
-require_relative "mcp_toolkit/auth/authenticator"
-require_relative "mcp_toolkit/auth/authority"
-
-# Server + tools wrap the official `mcp` gem.
-require_relative "mcp_toolkit/server"
-
-# Transport (Streamable-HTTP controller concern) + cache-backed session.
-require_relative "mcp_toolkit/session"
-require_relative "mcp_toolkit/transport/controller_methods"
+loader = Zeitwerk::Loader.for_gem
+# `version.rb` is loaded manually above; let Zeitwerk ignore it so it doesn't try
+# to manage the already-defined constant.
+loader.ignore("#{__dir__}/mcp_toolkit/version.rb")
+loader.setup
 
 # The toolkit for building account-scoped, read-only MCP servers on top of the
 # official `mcp` gem. See README.md for the satellite + authority quickstarts.

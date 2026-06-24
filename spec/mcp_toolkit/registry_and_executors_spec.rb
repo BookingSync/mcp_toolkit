@@ -27,8 +27,13 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         {
           "id" => FakeRelation::Column.new(:integer),
           "name" => FakeRelation::Column.new(:string),
-          "booking_id" => FakeRelation::Column.new(:integer)
+          "booking_id" => FakeRelation::Column.new(:integer),
+          "price" => FakeRelation::Column.new(:integer)
         }
+      end
+
+      def self.primary_key
+        "id"
       end
 
       def self.model_name
@@ -41,13 +46,13 @@ RSpec.describe "Registry + executors + serializer (data path)" do
 
   let(:rows) do
     [
-      FakeRecord.new(id: 1, name: "alpha", booking_id: 10),
-      FakeRecord.new(id: 2, name: "beta", booking_id: 20),
-      FakeRecord.new(id: 3, name: "gamma", booking_id: 10)
+      FakeRecord.new(id: 1, name: "alpha", booking_id: 10, price: 100),
+      FakeRecord.new(id: 2, name: "beta", booking_id: 20, price: 200),
+      FakeRecord.new(id: 3, name: "gamma", booking_id: 10, price: 300)
     ]
   end
 
-  let(:relation) { FakeRelation.new(rows, table_name: "widgets") }
+  let(:relation) { FakeRelation.new(rows, table_name: "widgets", model: widget_model) }
   let(:resource) { McpToolkit.registry.fetch("widgets") }
 
   before do
@@ -59,7 +64,7 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         model model
         serializer serializer
         description "Test widgets."
-        filterable booking_id: :booking_id
+        filterable booking_id: :booking_id, name: :name, price: :price
         scope { |_root| rel }
       end
     end
@@ -81,6 +86,12 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       expect(result[:widgets].map { |w| w[:id] }).to eq([1, 3])
     end
 
+    it "treats a comma-separated equality value as an IN set (API v3 parity)" do
+      result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: "10,20" } })
+
+      expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
+    end
+
     it "rejects unknown filter keys with InvalidParams" do
       expect do
         described_class.call(resource:, scope_root: account, params: { filter: { bogus: 1 } })
@@ -91,6 +102,111 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       result = described_class.call(resource:, scope_root: account, params: { ids: "1,3" })
 
       expect(result[:widgets].map { |w| w[:id] }).to eq([1, 3])
+    end
+
+    describe "operator-based (complex hash) filtering — API v3 parity" do
+      it "applies a single { op:, value: } comparison condition" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { price: { op: "gteq", value: 200 } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2, 3])
+      end
+
+      it "ANDs an array of conditions into a range" do
+        result = described_class.call(
+          resource:, scope_root: account,
+          params: { filter: { price: [{ op: "gteq", value: 150 }, { op: "lt", value: 300 }] } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "supports not_eq" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: { op: "not_eq", value: 10 } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "supports case-insensitive substring matching on string columns" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "matches", value: "ET" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "rejects an operator unsupported for the column's type" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { name: { op: "gt", value: "a" } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /not supported/)
+      end
+
+      it "rejects a condition with a blank operator" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { price: { op: "", value: 10 } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /operator is required/)
+      end
+    end
+
+    describe "ordering by numeric vs non-numeric primary key (API v3 parity)" do
+      # A relation that records which column it was last ordered by.
+      let(:ordering_relation_class) do
+        Class.new(FakeRelation) do
+          attr_reader :ordered_by
+
+          def order(column)
+            @ordered_by = column
+            super
+          end
+        end
+      end
+
+      def register_resource_with_pk_type(pk_type)
+        model = Class.new do
+          define_singleton_method(:columns_hash) do
+            { "id" => FakeRelation::Column.new(pk_type), "created_at" => FakeRelation::Column.new(:datetime) }
+          end
+          def self.primary_key = "id"
+          def self.model_name = FakeModelName.new("things")
+        end
+        serializer = Class.new(McpToolkit::Serializer::Base) do
+          attributes :id
+          self.model_class = model
+          def self.name = "ThingSerializer"
+        end
+        rel = ordering_relation_class.new([FakeRecord.new(id: 1, created_at: nil)], table_name: "things", model:)
+        McpToolkit.configure do |c|
+          c.registry.register(:things) do
+            model model
+            serializer serializer
+            scope { |_root| rel }
+          end
+        end
+        rel
+      end
+
+      it "orders by :id when the primary key is numeric" do
+        rel = register_resource_with_pk_type(:integer)
+
+        described_class.call(resource: McpToolkit.registry.fetch("things"), scope_root: account, params: {})
+
+        expect(rel.ordered_by).to eq(:id)
+      end
+
+      it "orders by :created_at when the primary key is non-numeric" do
+        rel = register_resource_with_pk_type(:uuid)
+
+        described_class.call(resource: McpToolkit.registry.fetch("things"), scope_root: account, params: {})
+
+        expect(rel.ordered_by).to eq(:created_at)
+      end
     end
   end
 
@@ -123,7 +239,13 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       booking = schema[:attributes].find { |a| a[:name] == :booking_id }
       expect(booking).to include(type: "integer", filterable: true)
       expect(schema[:standard_filters]).to eq(%w[ids updated_since limit offset])
-      expect(schema[:filters]).to eq([{ key: :booking_id, column: :booking_id, type: "integer", format: "integer" }])
+      expect(schema[:filters]).to eq(
+        [
+          { key: :booking_id, column: :booking_id, type: "integer", format: "integer" },
+          { key: :name, column: :name, type: "string", format: "string" },
+          { key: :price, column: :price, type: "integer", format: "integer" }
+        ]
+      )
     end
   end
 

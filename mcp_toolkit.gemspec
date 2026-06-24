@@ -39,11 +39,14 @@ Gem::Specification.new do |spec|
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
 
+  # Zeitwerk autoloads the gem's lib tree, so there are no manual require
+  # statements for the gem's own files.
+  spec.add_dependency "zeitwerk", "~> 2.6"
   # The official MCP SDK is the JSON-RPC dispatcher core this toolkit wraps.
   spec.add_dependency "mcp", "~> 0.18"
   # activesupport supplies the cache-store contract, time, and Hash/Array helpers
-  # the extracted code relies on (deep_symbolize_keys, Array.wrap, iso8601, ...).
-  # We depend on it, not on full Rails, so non-Rails hosts can consume the gem.
+  # the toolkit relies on (deep_symbolize_keys, Array.wrap, iso8601, ...). We
+  # depend on it, not on full Rails, so non-Rails hosts can consume the gem.
   spec.add_dependency "activesupport", ">= 6.1"
   # faraday is the HTTP client the satellite uses to introspect tokens against
   # the central app.

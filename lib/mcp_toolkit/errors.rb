@@ -6,8 +6,6 @@ module McpToolkit
   # protocol error). This matches how MCP clients (and a gateway relaying the
   # satellite's `result` verbatim) expect tool failures to surface: the call
   # succeeds at the protocol level, the result carries the error.
-  #
-  # Extracted from bsa-notifications' `McpServer::Error`.
   module Errors
     class Base < StandardError; end
 
