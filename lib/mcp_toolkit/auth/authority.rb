@@ -22,7 +22,7 @@ module McpToolkit
     #   #account_ids     -> Array of authorized account ids
     #   #expires_at      -> a Time/DateTime responding to #iso8601, or nil
     #   #application_keys -> Array of application keys the token is scoped to ([] = unrestricted)
-    #   #scopes          -> Array of OAuth-style `<app>_<action>` scopes ([] = unrestricted).
+    #   #scopes          -> Array of OAuth-style `<app>__<action>` scopes ([] = unrestricted).
     #                       Optional; absent => emitted as []. Replaces application_keys
     #                       as the authorization source on the satellite side.
     #

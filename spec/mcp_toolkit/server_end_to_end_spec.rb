@@ -54,7 +54,7 @@ RSpec.describe "Server end-to-end (tools/call)" do
       status: 200,
       headers: { "Content-Type" => "application/json" },
       body: JSON.generate(
-        valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: ["widgets_app_read"]
+        valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: ["widgets_app__read"]
       )
     )
   end
@@ -80,8 +80,8 @@ RSpec.describe "Server end-to-end (tools/call)" do
     expect(payload["meta"]).to include("total_count" => 2)
   end
 
-  it "allows a list call when the token carries the required <app>_read scope" do
-    # the default before-stub already carries scopes: ["widgets_app_read"]
+  it "allows a list call when the token carries the required <app>__read scope" do
+    # the default before-stub already carries scopes: ["widgets_app__read"]
     response = call_tool({ "resource" => "widgets" })
 
     expect(response.dig("result", "isError")).to be_falsey
@@ -89,13 +89,13 @@ RSpec.describe "Server end-to-end (tools/call)" do
     expect(payload["widgets"].map { |w| w["id"] }).to eq([1, 2])
   end
 
-  it "rejects a list call when the token lacks the required <app>_read scope" do
+  it "rejects a list call when the token lacks the required <app>__read scope" do
     stub_request(:post, introspect_endpoint).to_return(
       status: 200,
       headers: { "Content-Type" => "application/json" },
       body: JSON.generate(
         # reaches the app (has a widgets_app_* scope) but not the read action
-        valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: ["widgets_app_write"]
+        valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: ["widgets_app__write"]
       )
     )
 
@@ -105,7 +105,7 @@ RSpec.describe "Server end-to-end (tools/call)" do
     expect(response.dig("result", "isError")).to be(true)
     text = response.dig("result", "content", 0, "text")
     expect(text).to include("Unauthorized")
-    expect(text).to include("widgets_app_read")
+    expect(text).to include("widgets_app__read")
   end
 
   it "surfaces an unknown resource as an isError tool result, not a protocol error" do

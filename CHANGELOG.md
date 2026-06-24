@@ -3,8 +3,8 @@
 ### Added
 
 - OAuth-style **scope** enforcement. Tokens now carry `scopes` of the form
-  `<app>_<action>` (e.g. `notifications_read`). Every tool call requires the exact
-  `"#{required_application}_#{scope_action}"` scope; a token lacking it is rejected
+  `<app>__<action>` (e.g. `notifications__read`). Every tool call requires the exact
+  `"#{required_application}__#{scope_action}"` scope; a token lacking it is rejected
   with an `isError` result. NULL/empty token scopes remain unrestricted
   (backward-compat).
 - `scope_action` class-level DSL on `Tools::Base` (defaults to `:read`, inherited

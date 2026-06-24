@@ -22,8 +22,8 @@ module McpToolkit
     class Base < MCP::Tool
       class << self
         # The OAuth-style action this tool requires, combined with the configured
-        # `required_application` into the `<app>_<action>` scope a token must carry
-        # (e.g. `notifications_read`). Defaults to `:read`; inherited by subclasses.
+        # `required_application` into the `<app>__<action>` scope a token must carry
+        # (e.g. `notifications__read`). Defaults to `:read`; inherited by subclasses.
         # A write tool would declare `scope_action :write`.
         def scope_action(action = nil)
           @scope_action = action.to_sym if action
@@ -49,7 +49,7 @@ module McpToolkit
             config:
           )
 
-          required_scope = "#{config.required_application}_#{scope_action}"
+          required_scope = "#{config.required_application}__#{scope_action}"
           unless context.introspection.authorized_for_scope?(required_scope)
             return error_response("Unauthorized: token lacks the #{required_scope.inspect} scope")
           end
@@ -76,7 +76,7 @@ module McpToolkit
             )
           end
 
-          required_scope = "#{config.required_application}_#{scope_action}"
+          required_scope = "#{config.required_application}__#{scope_action}"
           unless introspection.authorized_for_scope?(required_scope)
             return error_response("Unauthorized: token lacks the #{required_scope.inspect} scope")
           end

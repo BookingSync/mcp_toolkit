@@ -19,7 +19,7 @@ module McpToolkit
     #     account_id: <id|null>,
     #     account_ids: [...],
     #     expires_at: <iso8601|null>,
-    #     scopes: [...] }   # OAuth-style `<app>_<action>` scopes; [] / null = unrestricted
+    #     scopes: [...] }   # OAuth-style `<app>__<action>` scopes; [] / null = unrestricted
     #
     # `applications` may still appear for backward-compat but is no longer used for
     # authorization — app-reach and per-action authorization both derive from
@@ -51,7 +51,7 @@ module McpToolkit
 
         # True when the token can reach `required_application` (or when no required
         # application is configured — then any valid token passes). App-reach is
-        # derived from the token's `scopes` of the form `<app>_<action>`: a token
+        # derived from the token's `scopes` of the form `<app>__<action>`: a token
         # reaches an app if it carries any scope for that app. NULL/empty scopes =
         # unrestricted (backward-compat).
         def authorized_for_application?(required_application)
@@ -61,11 +61,11 @@ module McpToolkit
           return true if scope_list.empty? # unrestricted token
 
           app = required_application.to_s
-          scope_list.any? { |s| s == app || s.start_with?("#{app}_") }
+          scope_list.any? { |s| s.start_with?("#{app}__") }
         end
 
         # True when the token carries the EXACT `required_scope` (e.g.
-        # `notifications_read`). NULL/empty scopes = unrestricted (backward-compat);
+        # `notifications__read`). NULL/empty scopes = unrestricted (backward-compat);
         # an empty required scope passes.
         def authorized_for_scope?(required_scope)
           return true if required_scope.to_s.empty?
