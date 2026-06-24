@@ -77,6 +77,69 @@ RSpec.describe "Authentication" do
       expect(result.authorized_for_scope?(nil)).to be(true)
     end
 
+    describe "local expiry enforcement (defense-in-depth)" do
+      it "rejects a valid:true token whose expires_at is in the past" do
+        stub_introspect(
+          token: "lapsed",
+          body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42],
+                  expires_at: (Time.now - 3600).utc.iso8601, scopes: ["notifications__read"] }
+        )
+
+        result = described_class.call("lapsed")
+
+        expect(result).not_to be_valid
+        expect(result).to be_expired
+      end
+
+      it "accepts a valid:true token whose expires_at is in the future" do
+        stub_introspect(
+          token: "fresh",
+          body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42],
+                  expires_at: (Time.now + 3600).utc.iso8601, scopes: ["notifications__read"] }
+        )
+
+        result = described_class.call("fresh")
+
+        expect(result).to be_valid
+        expect(result).not_to be_expired
+      end
+
+      it "treats a nil/absent expires_at as a token with no expiry (valid)" do
+        stub_introspect(
+          token: "no_expiry",
+          body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42],
+                  expires_at: nil, scopes: ["notifications__read"] }
+        )
+
+        result = described_class.call("no_expiry")
+
+        expect(result).to be_valid
+        expect(result).not_to be_expired
+      end
+
+      it "treats an unparseable expires_at as expired (fail-closed)" do
+        stub_introspect(
+          token: "garbage_expiry",
+          body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42],
+                  expires_at: "not-a-timestamp", scopes: ["notifications__read"] }
+        )
+
+        result = described_class.call("garbage_expiry")
+
+        expect(result).to be_expired
+        expect(result).not_to be_valid
+      end
+
+      it "expires a cached Result the moment it lapses (evaluated at check time)" do
+        result = McpToolkit::Auth::Introspection::Result.new(
+          valid: true, expires_at: (Time.now - 1).utc.iso8601, scopes: ["notifications__read"]
+        )
+
+        expect(result).to be_expired
+        expect(result).not_to be_valid
+      end
+    end
+
     it "returns INVALID on a 401 from the central app" do
       stub_introspect(token: "bad", status: 401, body: { valid: false })
 

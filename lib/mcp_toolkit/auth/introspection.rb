@@ -2,6 +2,7 @@
 
 require "digest"
 require "json"
+require "time"
 require "faraday"
 
 # SATELLITE side. Authenticates the bearer token the central app forwards by
@@ -31,9 +32,44 @@ class McpToolkit::Auth::Introspection
   Result = Struct.new(
     :valid, :kind, :account_id, :account_ids, :expires_at, :scopes, keyword_init: true
   ) do
+    # Locally enforce the authority's `expires_at` (defense-in-depth): a token is
+    # only valid when the authority said so AND it has not lapsed. Without this,
+    # validity would rest solely on the authority's `valid: true` boolean, so a
+    # stale `valid: true` (e.g. a clock-skewed or buggy authority, or a cached
+    # Result) with a past `expires_at` would be accepted indefinitely.
     def valid?
-      valid == true
+      valid == true && !expired?
     end
+
+    # True when `expires_at` is present and now is at/after it. Blank/nil means
+    # the token has no expiry (=> not expired). An UNPARSEABLE `expires_at` is
+    # treated as expired (fail-closed) rather than silently accepted. Kept public
+    # for clarity/testability.
+    def expired?
+      raw = expires_at
+      return false if raw.nil? || raw.to_s.strip.empty?
+
+      expiry = parse_expiry(raw)
+      return true if expiry.nil? # unparseable => fail closed
+
+      expiry <= Time.now
+    end
+
+    private
+
+    def parse_expiry(raw)
+      return raw if raw.is_a?(Time)
+
+      Time.iso8601(raw.to_s)
+    rescue ArgumentError, TypeError
+      begin
+        Time.parse(raw.to_s)
+      rescue ArgumentError, TypeError
+        nil
+      end
+    end
+
+    public
 
     def accounts_user?
       kind.to_s == "accounts_user"
