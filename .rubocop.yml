@@ -19,17 +19,16 @@ Layout/LineLength:
 # --- Style ------------------------------------------------------------------
 
 # Prefer FLAT (compact) leaf declarations — `class McpToolkit::Auth::Authenticator`
-# — over the `module ... module ... class` pyramid. Files that genuinely define
-# several constants under one namespace (so the namespace must be opened as a
-# block) are excluded; there compact is not expressible.
+# — over the `module ... module ... class` pyramid. The only exception is the gem
+# entry point, which must open `module McpToolkit` as a block to host the Zeitwerk
+# loader setup, the top-level configuration methods, and the `MCPToolkit` alias;
+# compact is not expressible there. Files that genuinely defined several constants
+# under one namespace (the errors hierarchy) are split one-constant-per-file under
+# lib/mcp_toolkit/errors/ so each can be declared compactly.
 Style/ClassAndModuleChildren:
   EnforcedStyle: compact
   Exclude:
     - "lib/mcp_toolkit.rb"
-    - "lib/mcp_toolkit/errors.rb"
-    - "lib/mcp_toolkit/filtering.rb"
-    - "lib/mcp_toolkit/serializer/base.rb"
-    - "lib/mcp_toolkit/tools/base.rb"
 
 # The gem (gemspec, Gemfile, lib, specs) is written with double-quoted strings;
 # match that convention instead of churning every literal.
@@ -115,12 +114,13 @@ RSpec/NestedGroups:
 RSpec/MultipleMemoizedHelpers:
   Enabled: false
 
-# Integration-style specs (data path, server end-to-end) intentionally describe
-# a behaviour with a string rather than a single class.
+# Integration-style specs (data path, server end-to-end, Zeitwerk eager loading)
+# intentionally describe a behaviour with a string rather than a single class.
 RSpec/DescribeClass:
   Exclude:
     - "spec/mcp_toolkit/registry_and_executors_spec.rb"
     - "spec/mcp_toolkit/server_end_to_end_spec.rb"
+    - "spec/mcp_toolkit/eager_load_spec.rb"
 
 # `@touched` lives on a test-double class defined inside the example, not on the
 # example scope; the cop misreads it as an example ivar.
