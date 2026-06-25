@@ -17,12 +17,12 @@ RSpec.describe McpToolkit do
     it "yields the active configuration and returns it" do
       returned = mcp_toolkit.configure do |c|
         c.server_name = "configured-mcp"
-        c.required_application = "thing"
+        c.registry.default_required_permissions_scope "thing__read"
       end
 
       expect(returned).to be(mcp_toolkit.config)
       expect(mcp_toolkit.config.server_name).to eq("configured-mcp")
-      expect(mcp_toolkit.config.required_application).to eq("thing")
+      expect(mcp_toolkit.config.registry.default_required_permissions_scope).to eq("thing__read")
     end
   end
 

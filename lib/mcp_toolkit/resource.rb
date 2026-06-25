@@ -25,6 +25,7 @@ class McpToolkit::Resource
     @scope_block = nil
     @description = nil
     @filterable = {}
+    @required_permissions_scope = nil
   end
 
   def model(klass = nil)
@@ -45,6 +46,24 @@ class McpToolkit::Resource
   def description(text = nil)
     @description = text if text
     @description
+  end
+
+  # The OAuth-style scope a token MUST carry to reach this resource via the
+  # generic tools (e.g. "notifications__read"). Declared explicitly per resource:
+  #
+  #   required_permissions_scope "notifications__read"
+  #
+  # Default nil = no scope required for this resource (unless the registry sets a
+  # default — see Registry#default_required_permissions_scope). Read with no arg.
+  def required_permissions_scope(scope = nil)
+    @required_permissions_scope = scope if scope
+    @required_permissions_scope
+  end
+
+  # The scope actually enforced for this resource: its own declared scope if set,
+  # otherwise the registry-level `default` passed in. nil = no scope required.
+  def effective_required_permissions_scope(default = nil)
+    @required_permissions_scope || default
   end
 
   # Declares the per-attribute filters this resource accepts on the `list` tool.

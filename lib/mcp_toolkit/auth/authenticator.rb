@@ -13,9 +13,11 @@
 #      `config.account_resolver` (e.g. Account.find_by(synced_id:)) and return
 #      it as the tools' `scope_root`.
 #
-# The exact `<app>__<action>` scope is enforced separately by Tools::Base
-# (#with_account / #with_authentication) via `authorized_for_scope?`; the
-# authenticator only validates the token and resolves the tenant.
+# The required scope (explicitly declared per resource via
+# `required_permissions_scope`, or the registry default) is enforced separately
+# by Tools::Base (#with_account / #with_authentication) via
+# `authorized_for_scope?`; the authenticator only validates the token and
+# resolves the tenant.
 #
 # The account selector mirrors what a gateway forwards: the resolved account id
 # arrives as `_meta[config.account_meta_key]`. We also accept an `account_id`

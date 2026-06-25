@@ -15,8 +15,9 @@
 #     expires_at: <iso8601|null>,
 #     scopes: [...] }   # OAuth-style `<app>__<action>` scopes a token carries
 #
-# Authorization is purely scope-based: a token reaches a tool when it carries
-# every `<app>__<action>` scope that tool requires (enforced in
+# Authorization is purely scope-based: a token reaches a tool when it carries the
+# scope that tool explicitly requires (declared per resource via
+# `required_permissions_scope`, or the registry default; enforced in
 # Tools::Base#with_account / #with_authentication via `authorized_for_scope?`).
 #
 # The cache is keyed on a SHA-256 of the token (never the plaintext) so cached

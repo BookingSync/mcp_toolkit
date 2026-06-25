@@ -13,15 +13,6 @@
 # process can, in principle, host more than one configured server; it falls back
 # to `McpToolkit.config`.
 class McpToolkit::Tools::Base < MCP::Tool
-  # The OAuth-style action this tool requires, combined with the configured
-  # `required_application` into the `<app>__<action>` scope a token must carry
-  # (e.g. `notifications__read`). Defaults to `:read`; inherited by subclasses.
-  # A write tool would declare `scope_action :write`.
-  def self.scope_action(action = nil)
-    @scope_action = action.to_sym if action
-    @scope_action || :read
-  end
-
   # Runs `block` with an authenticated, scoped context, serializing any
   # McpToolkit::Errors into a clean text tool error.
   #
@@ -31,7 +22,11 @@ class McpToolkit::Tools::Base < MCP::Tool
   # `account_id` is the superuser account selector arriving as a tool
   # argument (the gem passes tool args as kwargs, not via server_context),
   # threaded here so it joins `_meta` / the header in the resolution order.
-  def self.with_account(server_context, account_id: nil)
+  #
+  # `required_scope` is the explicitly-declared scope a token must carry (the
+  # caller resolves it from the resource — see Registry#required_scope_for).
+  # Empty/nil => no scope check (authorized_for_scope? treats "" as a pass).
+  def self.with_account(server_context, account_id: nil, required_scope: nil)
     config = config_from(server_context)
     context = McpToolkit::Auth::Authenticator.call(
       token: server_context[:bearer_token],
@@ -41,7 +36,6 @@ class McpToolkit::Tools::Base < MCP::Tool
       config:
     )
 
-    required_scope = "#{config.required_application}__#{scope_action}"
     unless context.introspection.authorized_for_scope?(required_scope)
       return error_response("Unauthorized: token lacks the #{required_scope.inspect} scope")
     end
@@ -53,16 +47,16 @@ class McpToolkit::Tools::Base < MCP::Tool
     error_response("Invalid request: #{e.message}")
   end
 
-  # Authenticates the token (valid + required `<app>__<action>` scope) WITHOUT
-  # requiring an account selection. Used by the schema-discovery tools, which
-  # reveal shape, not tenant data, so a superuser shouldn't have to pin an
-  # account just to discover what exists.
-  def self.with_authentication(server_context)
+  # Authenticates the token (valid + the explicitly-declared `required_scope`)
+  # WITHOUT requiring an account selection. Used by the schema-discovery tools,
+  # which reveal shape, not tenant data, so a superuser shouldn't have to pin an
+  # account just to discover what exists. Empty/nil `required_scope` => no scope
+  # check.
+  def self.with_authentication(server_context, required_scope: nil)
     config = config_from(server_context)
     introspection = McpToolkit::Auth::Introspection.call(server_context[:bearer_token], config:)
     return error_response("Unauthorized: invalid or expired token") unless introspection.valid?
 
-    required_scope = "#{config.required_application}__#{scope_action}"
     unless introspection.authorized_for_scope?(required_scope)
       return error_response("Unauthorized: token lacks the #{required_scope.inspect} scope")
     end
@@ -94,5 +88,13 @@ class McpToolkit::Tools::Base < MCP::Tool
     config.registry.fetch(name)
   rescue McpToolkit::Registry::UnknownResource => e
     raise McpToolkit::Errors::InvalidParams, e.message
+  end
+
+  # Validates the `resource` argument is present and resolves its descriptor,
+  # raising InvalidParams (=> clean tool error) for a blank or unknown resource.
+  def self.resolve_descriptor(name, config)
+    raise McpToolkit::Errors::InvalidParams, "resource is required" if name.to_s.strip.empty?
+
+    lookup_resource(name, config)
   end
 end

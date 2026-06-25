@@ -5,8 +5,13 @@
 # Generic but OPINIONATED: every setting has a sensible, vendor-neutral default,
 # so a satellite needs to override only a handful of values. The two things an
 # app almost always sets are
-# `server_name` and the auth wiring (`central_app_url` + `required_application`
-# for a satellite, or `token_authenticator` for the authority).
+# `server_name` and the auth wiring (`central_app_url` for a satellite, or
+# `token_authenticator` for the authority).
+#
+# Whether ANY scope is required is decided PER TOOL, not per app: a resource
+# declares `required_permissions_scope "notifications__read"` (or the registry
+# declares `default_required_permissions_scope` once for all resources). There is
+# no app-wide permission setting here.
 #
 # Accessed through `McpToolkit.config` (or `MCPToolkit.config`) and mutated in a
 # `McpToolkit.configure { |c| ... }` block.
@@ -50,10 +55,6 @@ class McpToolkit::Configuration
   attr_accessor :central_app_url
   # @return [String, nil] the introspect path appended to `central_app_url`.
   attr_accessor :introspect_path
-  # @return [String, nil] the application key a token MUST be scoped to for this
-  #   satellite (bsa-notifications' "notifications"). When nil, the application
-  #   scope check is skipped (any valid token is accepted).
-  attr_accessor :required_application
   # @return [Integer] seconds to cache an introspection result (positive AND
   #   negative) so a burst of tool calls does not hammer the central app.
   attr_accessor :introspection_cache_ttl
@@ -123,6 +124,15 @@ class McpToolkit::Configuration
   #   nil lets the gem negotiate (recommended). Set only to force an older spec.
   attr_accessor :protocol_version
 
+  # The parent class (as a String, resolved via `constantize`) of the
+  # gem-provided McpToolkit::ServerController that McpToolkit::Engine mounts.
+  # Doorkeeper-style indirection so a satellite mounting the engine can keep
+  # ActionController::Base (NOT ::API) — e.g. for a logstasher `helper_method`
+  # hook — by setting `c.parent_controller = "ApplicationController"`.
+  #
+  # @return [String]
+  attr_accessor :parent_controller
+
   # Header / meta-key constants. Vendor-neutral defaults; an app on a specific
   # central authority can rename them to match that authority's convention.
   # These are the selectors a superuser/multi-account token uses to pin the
@@ -152,7 +162,6 @@ class McpToolkit::Configuration
     @auth_role = :satellite
     @central_app_url = nil
     @introspect_path = "/mcp/tokens/introspect"
-    @required_application = nil
     @introspection_cache_ttl = 45
     @introspection_timeout = 10
     @account_resolver = ->(synced_account_id) { synced_account_id }
@@ -165,6 +174,7 @@ class McpToolkit::Configuration
     @sql_sanitizer = McpToolkit::SqlSanitizer.new
 
     @protocol_version = nil
+    @parent_controller = "ActionController::Base"
     @account_meta_key = "mcp-toolkit/account-id"
     @account_id_header = "X-MCP-Account-ID"
 

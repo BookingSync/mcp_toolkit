@@ -67,13 +67,22 @@ McpToolkit.configure do |c|
   # --- satellite auth ---
   c.auth_role            = :satellite
   c.central_app_url      = ENV.fetch("MCP_CENTRAL_APP_URL") # POSTs <url>/mcp/tokens/introspect
-  c.required_application  = "notifications"                 # token must be scoped to this app
+
+  # The scope every tool requires, declared ONCE for all resources. A resource
+  # can override it per-resource (see below). Omit entirely for "no scope
+  # required". Whether a scope is required is PER TOOL — there is no app-wide
+  # permission flag.
+  c.registry.default_required_permissions_scope "notifications__read"
 
   # Map the central account id to this app's LOCAL scope root (an Account here).
   c.account_resolver = ->(synced_account_id) { Account.find_by(synced_id: synced_account_id) }
 
   # Share sessions/introspection across workers.
   c.cache_store = Rails.cache
+
+  # The engine's controller inherits ActionController::Base by default; point it
+  # at ApplicationController if your stack needs helper_method (e.g. logstasher).
+  c.parent_controller = "ApplicationController"
 end
 ```
 
@@ -98,30 +107,32 @@ Rails.application.config.to_prepare do
     description "Scheduled mailings."
     # Expose a public filter key that maps to a synced storage column:
     filterable  booking_id: :synced_booking_id
+    # Override the registry default scope for just this resource (optional):
+    required_permissions_scope "notifications__read"
     scope { |account| ScheduledNotification.where(synced_account_id: account.synced_id) }
   end
 end
 ```
 
-**3. Mount the transport.** A controller that includes the concern, and routes:
+Each resource's effective required scope is its own `required_permissions_scope`
+if declared, else the registry's `default_required_permissions_scope`, else none.
 
-```ruby
-class Mcp::ServerController < ApplicationController
-  include McpToolkit::Transport::ControllerMethods
-end
-```
+**3. Mount the transport** — one line. The gem ships the engine *and* the
+controller, so a satellite writes no routes and no controller of its own:
 
 ```ruby
 # config/routes.rb
-post   "mcp",        to: "mcp/server#create"
-get    "mcp",        to: "mcp/server#stream"
-delete "mcp",        to: "mcp/server#destroy"
-get    "mcp/health", to: "mcp/server#health"
+mount McpToolkit::Engine => "/mcp"
 ```
 
-That's it. The four generic tools (`resources`, `resource_schema`, `get`,
+That yields `POST/GET/DELETE /mcp` + `GET /mcp/health` exactly as a hand-rolled
+satellite did. The four generic tools (`resources`, `resource_schema`, `get`,
 `list`) are now live over Streamable-HTTP, each call authenticated by
 introspecting the forwarded token and scoped to the resolved account.
+
+> Prefer to keep your own controller? The transport is also a standalone concern
+> — `include McpToolkit::Transport::ControllerMethods` in a controller and route
+> the four endpoints yourself. The engine is purely additive.
 
 ---
 
@@ -235,7 +246,6 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `auth_role` | `:satellite` | `:satellite` or `:authority` |
 | `central_app_url` | `nil` | satellite: base URL of the auth authority |
 | `introspect_path` | `"/mcp/tokens/introspect"` | satellite: appended to `central_app_url` |
-| `required_application` | `nil` | satellite: app key a token must be scoped to (`nil` = any valid token) |
 | `introspection_cache_ttl` | `45` | seconds to cache introspection results |
 | `introspection_timeout` | `10` | HTTP timeout (s) for the introspection call |
 | `account_resolver` | identity | maps the central account id → local scope root |
@@ -243,6 +253,7 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `cache_store` | `MemoryStore` | sessions + introspection cache (set to `Rails.cache`) |
 | `session_ttl` | `3600` | session sliding TTL (s) |
 | `protocol_version` | `nil` (negotiate) | pin an MCP protocol version |
+| `parent_controller` | `"ActionController::Base"` | superclass of the engine's `ServerController` (set to `"ApplicationController"` for `helper_method` compat) |
 | `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
 | `account_id_header` | `"X-MCP-Account-ID"` | header fallback for the account selector |
 
@@ -251,12 +262,15 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 - `McpToolkit.configure { |c| ... }`, `McpToolkit.config`, `McpToolkit.registry`,
   `McpToolkit.reset_config!`
 - `McpToolkit::Registry#register(name) { ... }` (DSL: `model`, `serializer`,
-  `scope`, `description`, `filterable`)
+  `scope`, `description`, `filterable`, `required_permissions_scope`) +
+  `#default_required_permissions_scope`
 - `McpToolkit::Serializer::Base` (DSL: `attributes`, `has_one`, `has_many`,
   `translates`)
 - `McpToolkit::Server.build(server_context:, config:, extra_tools:)`
-- `McpToolkit::Transport::ControllerMethods` (controller concern; override
-  `mcp_config` / `mcp_extra_tools`)
+- `McpToolkit::Engine` (mountable; `mount McpToolkit::Engine => "/mcp"`) +
+  `McpToolkit::ServerController` (its controller; parent via `parent_controller`)
+- `McpToolkit::Transport::ControllerMethods` (standalone controller concern;
+  override `mcp_config` / `mcp_extra_tools`)
 - `McpToolkit::Session`
 - `McpToolkit::Auth::Introspection` / `Authenticator` (satellite),
   `McpToolkit::Auth::Authority` (authority)

@@ -26,10 +26,13 @@ class McpToolkit::Tools::ResourceSchema < McpToolkit::Tools::Base
 
   def self.call(server_context:, resource: nil, **_args)
     config = config_from(server_context)
-    with_authentication(server_context) do
-      raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
-
-      McpToolkit::ResourceSchema.call(lookup_resource(resource, config))
+    # Resolve the resource FIRST so its effective required scope gates discovery
+    # of THIS resource's shape (and an unknown resource is a clean tool error).
+    descriptor = resolve_descriptor(resource, config)
+    with_authentication(server_context, required_scope: config.registry.required_scope_for(descriptor)) do
+      McpToolkit::ResourceSchema.call(descriptor)
     end
+  rescue McpToolkit::Errors::InvalidParams => e
+    error_response("Invalid request: #{e.message}")
   end
 end

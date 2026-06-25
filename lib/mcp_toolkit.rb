@@ -54,6 +54,12 @@ loader = Zeitwerk::Loader.for_gem
 # `version.rb` is loaded manually above; let Zeitwerk ignore it so it doesn't try
 # to manage the already-defined constant.
 loader.ignore("#{__dir__}/mcp_toolkit/version.rb")
+# `engine.rb` subclasses ::Rails::Engine, which is absent in a non-Rails host (and
+# in the gem's own unit suite). Keep it out of the autoloadable set and require it
+# explicitly below only when Rails is present. The gem-internal controller lives
+# under `app/controllers` (outside this lib-rooted loader), so it needs no ignore;
+# it is loaded by Rails' autoloader via the engine when mounted.
+loader.ignore("#{__dir__}/mcp_toolkit/engine.rb")
 loader.setup
 
 # The toolkit for building account-scoped, read-only MCP servers on top of the
@@ -74,7 +80,7 @@ module McpToolkit
   #   McpToolkit.configure do |c|
   #     c.server_name = "my-app-mcp"
   #     c.central_app_url = ENV.fetch("MCP_CENTRAL_APP_URL")
-  #     c.required_application = "my_app"
+  #     c.registry.default_required_permissions_scope "my_app__read"
   #   end
   def self.configure
     yield(config) if block_given?
@@ -101,3 +107,9 @@ end
 # Karol's requested entry-point spelling. `MCPToolkit.configure { ... }` and
 # `MCPToolkit.config` work identically to `McpToolkit.*`.
 MCPToolkit = McpToolkit unless defined?(MCPToolkit)
+
+# The mountable engine is ADDITIVE and Rails-only: a satellite can either mount
+# `McpToolkit::Engine` (engine + gem controller) OR keep including
+# `McpToolkit::Transport::ControllerMethods` in its own controller. Loaded only
+# when Rails::Engine is present (it was ignored by the loader above).
+require_relative "mcp_toolkit/engine" if defined?(Rails::Engine)

@@ -55,11 +55,14 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
 
   def self.call(server_context:, resource: nil, account_id: nil, **params)
     config = config_from(server_context)
-    with_account(server_context, account_id:) do |scope_root|
-      raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
-
-      descriptor = lookup_resource(resource, config)
+    # Resolve the resource FIRST so its effective required scope is known before
+    # the scope check (and so an unknown resource is a clean tool error).
+    descriptor = resolve_descriptor(resource, config)
+    required_scope = config.registry.required_scope_for(descriptor)
+    with_account(server_context, account_id:, required_scope:) do |scope_root|
       McpToolkit::ListExecutor.call(resource: descriptor, scope_root:, params:)
     end
+  rescue McpToolkit::Errors::InvalidParams => e
+    error_response("Invalid request: #{e.message}")
   end
 end

@@ -260,6 +260,49 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       expect { McpToolkit.registry.fetch("nope") }.to raise_error(McpToolkit::Registry::UnknownResource)
     end
 
+    describe "required scope resolution" do
+      subject(:registry) { McpToolkit::Registry.new }
+
+      def register_resource(name, &)
+        registry.register(name, &)
+        registry.fetch(name.to_s)
+      end
+
+      it "uses a resource's own required_permissions_scope when declared" do
+        resource = register_resource(:scoped) { required_permissions_scope "widgets__read" }
+
+        expect(registry.required_scope_for(resource)).to eq("widgets__read")
+      end
+
+      it "falls back to the registry default for a resource without its own scope" do
+        registry.default_required_permissions_scope "app__read"
+        resource = register_resource(:unscoped) { description "no scope of its own" }
+
+        expect(registry.required_scope_for(resource)).to eq("app__read")
+      end
+
+      it "prefers a resource's own scope over the registry default" do
+        registry.default_required_permissions_scope "app__read"
+        resource = register_resource(:own) { required_permissions_scope "own__read" }
+
+        expect(registry.required_scope_for(resource)).to eq("own__read")
+      end
+
+      it "returns nil (no scope required) with neither a default nor a resource scope" do
+        resource = register_resource(:open) { description "open" }
+
+        expect(registry.required_scope_for(resource)).to be_nil
+      end
+
+      it "preserves the default scope across reset! (declared in configure, not to_prepare)" do
+        registry.default_required_permissions_scope "app__read"
+        registry.reset!
+
+        expect(registry.default_required_permissions_scope).to eq("app__read")
+        expect(registry.resources).to be_empty
+      end
+    end
+
     it "fails loudly when a resource is missing its serializer" do
       McpToolkit.registry.register(:broken) do
         model Object

@@ -14,7 +14,9 @@ class McpToolkit::Tools::Resources < McpToolkit::Tools::Base
 
   def self.call(server_context:, **_args)
     config = config_from(server_context)
-    with_authentication(server_context) do
+    # Discovery requires the registry-level default scope (the satellite's
+    # app-wide scope); per-resource scopes are enforced by `get` / `list`.
+    with_authentication(server_context, required_scope: config.registry.default_required_permissions_scope) do
       {
         resources: config.registry.resources.map do |resource|
           { name: resource.name, description: resource.description }

@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 require "spec_helper"
+# This spec raises Faraday::ConnectionFailed directly (the unreachable-central
+# case). faraday is required lazily by Auth::AuthorityServerClient, which isn't
+# guaranteed to have loaded before this file runs under a randomized order, so
+# require it here where the constant is referenced.
+require "faraday"
 
 RSpec.describe "Authentication" do
   let(:central_url) { "https://central.example.com" }
@@ -10,7 +15,7 @@ RSpec.describe "Authentication" do
     McpToolkit.configure do |c|
       c.auth_role = :satellite
       c.central_app_url = central_url
-      c.required_application = "notifications"
+      c.registry.default_required_permissions_scope "notifications__read"
       c.introspection_cache_ttl = 0 # don't let cache mask repeated stubs in tests
       # Map the central account id to a local "scope root" object.
       c.account_resolver = ->(synced_id) { synced_id == 42 ? :local_account_42 : nil }

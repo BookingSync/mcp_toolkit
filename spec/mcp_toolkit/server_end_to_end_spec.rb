@@ -40,8 +40,10 @@ RSpec.describe "Server end-to-end (tools/call)" do
     McpToolkit.configure do |c|
       c.server_name = "e2e-mcp"
       c.central_app_url = central_url
-      c.required_application = "widgets_app"
       c.account_resolver = ->(synced_id) { synced_id == 42 ? :account_42 : nil }
+      # The registry default scope applies to every resource that doesn't declare
+      # its own (and to the discovery tools).
+      c.registry.default_required_permissions_scope "widgets_app__read"
       c.registry.register(:widgets) do
         model model
         serializer serializer
@@ -131,5 +133,111 @@ RSpec.describe "Server end-to-end (tools/call)" do
 
     names = response.dig("result", "tools").map { |t| t["name"] }
     expect(names).to contain_exactly("get", "list", "resources", "resource_schema")
+  end
+
+  describe "explicit per-resource required_permissions_scope" do
+    # A second resource declaring its OWN scope, overriding the registry default,
+    # registered alongside the default-scoped `widgets`.
+    before do
+      serializer = widget_serializer
+      model = widget_model
+      relation = FakeRelation.new(rows, table_name: "gadgets")
+      McpToolkit.registry.register(:gadgets) do
+        model model
+        serializer serializer
+        description "Gadgets."
+        required_permissions_scope "gadgets_app__read"
+        scope { |_root| relation }
+      end
+    end
+
+    def stub_scopes(scopes)
+      stub_request(:post, introspect_endpoint).to_return(
+        status: 200,
+        headers: { "Content-Type" => "application/json" },
+        body: JSON.generate(
+          valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes:
+        )
+      )
+    end
+
+    it "rejects a resource-scoped tool when the token lacks the resource's own scope" do
+      stub_scopes(["widgets_app__read"]) # has the default, not the gadgets scope
+
+      response = call_tool({ "resource" => "gadgets" })
+
+      expect(response).not_to have_key("error")
+      expect(response.dig("result", "isError")).to be(true)
+      text = response.dig("result", "content", 0, "text")
+      expect(text).to include("Unauthorized")
+      expect(text).to include("gadgets_app__read")
+    end
+
+    it "accepts a resource-scoped tool when the token carries the resource's own scope" do
+      stub_scopes(["gadgets_app__read"])
+
+      response = call_tool({ "resource" => "gadgets" })
+
+      expect(response.dig("result", "isError")).to be_falsey
+      # The collection root key derives from the (shared) serializer's model name,
+      # "widgets"; the assertion that matters here is that the call was authorized.
+      payload = JSON.parse(response.dig("result", "content", 0, "text"))
+      expect(payload["widgets"].map { |w| w["id"] }).to eq([1, 2])
+    end
+  end
+
+  describe "the registry default scope" do
+    it "applies to a resource that declares no scope of its own" do
+      # `widgets` declares no scope; the registry default `widgets_app__read` is
+      # what the default before-stub carries, so the call is allowed.
+      expect(list_response.dig("result", "isError")).to be_falsey
+    end
+  end
+
+  describe "a resource (and discovery) with NO scope required at all" do
+    # A registry with neither a default scope nor a per-resource scope: any valid
+    # token reaches the tools.
+    before do
+      serializer = widget_serializer
+      model = widget_model
+      relation = FakeRelation.new(rows, table_name: "widgets")
+      # Start from a pristine config (the outer before set a registry default
+      # scope; this scenario needs none).
+      McpToolkit.reset_config!
+      McpToolkit.configure do |c|
+        c.server_name = "open-mcp"
+        c.central_app_url = central_url
+        c.account_resolver = ->(synced_id) { synced_id == 42 ? :account_42 : nil }
+        c.registry.register(:widgets) do
+          model model
+          serializer serializer
+          description "Widgets."
+          scope { |_root| relation }
+        end
+      end
+
+      stub_request(:post, introspect_endpoint).to_return(
+        status: 200,
+        headers: { "Content-Type" => "application/json" },
+        # token carries NO scopes at all
+        body: JSON.generate(valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: [])
+      )
+    end
+
+    it "is reachable by any valid token (list)" do
+      response = call_tool({ "resource" => "widgets" })
+
+      expect(response.dig("result", "isError")).to be_falsey
+      payload = JSON.parse(response.dig("result", "content", 0, "text"))
+      expect(payload["widgets"].map { |w| w["id"] }).to eq([1, 2])
+    end
+
+    it "is reachable by any valid token (discovery: resources)" do
+      server = McpToolkit::Server.build(server_context: { bearer_token: "forwarded-token", header_account_id: nil })
+      request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "resources", arguments: {} } }
+      response = JSON.parse(server.handle_json(JSON.generate(request)))
+
+      expect(response.dig("result", "isError")).to be_falsey
+    end
   end
 end
