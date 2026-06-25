@@ -3,24 +3,26 @@
 require "spec_helper"
 
 RSpec.describe McpToolkit do
+  subject(:mcp_toolkit) { described_class }
+
   it "has a version number" do
     expect(McpToolkit::VERSION).not_to be_nil
   end
 
   it "exposes MCPToolkit as an alias of McpToolkit" do
-    expect(MCPToolkit).to equal(described_class)
+    expect(MCPToolkit).to equal(mcp_toolkit)
   end
 
   describe ".configure" do
     it "yields the active configuration and returns it" do
-      returned = described_class.configure do |c|
+      returned = mcp_toolkit.configure do |c|
         c.server_name = "configured-mcp"
         c.required_application = "thing"
       end
 
-      expect(returned).to be(described_class.config)
-      expect(described_class.config.server_name).to eq("configured-mcp")
-      expect(described_class.config.required_application).to eq("thing")
+      expect(returned).to be(mcp_toolkit.config)
+      expect(mcp_toolkit.config.server_name).to eq("configured-mcp")
+      expect(mcp_toolkit.config.required_application).to eq("thing")
     end
   end
 
@@ -47,7 +49,7 @@ RSpec.describe McpToolkit do
 
   describe ".registry" do
     it "delegates to the active config's registry" do
-      expect(described_class.registry).to be(described_class.config.registry)
+      expect(mcp_toolkit.registry).to be(mcp_toolkit.config.registry)
     end
   end
 end

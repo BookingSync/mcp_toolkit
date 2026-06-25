@@ -12,16 +12,14 @@ class McpToolkit::Tools::Resources < McpToolkit::Tools::Base
 
   input_schema(properties: {})
 
-  class << self
-    def call(server_context:, **_args)
-      config = config_from(server_context)
-      with_authentication(server_context) do
-        {
-          resources: config.registry.resources.map do |resource|
-            { name: resource.name, description: resource.description }
-          end
-        }
-      end
+  def self.call(server_context:, **_args)
+    config = config_from(server_context)
+    with_authentication(server_context) do
+      {
+        resources: config.registry.resources.map do |resource|
+          { name: resource.name, description: resource.description }
+        end
+      }
     end
   end
 end

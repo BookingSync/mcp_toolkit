@@ -53,13 +53,19 @@ RSpec.describe "Registry + executors + serializer (data path)" do
   end
 
   let(:relation) { FakeRelation.new(rows, table_name: "widgets", model: widget_model) }
-  let(:resource) { McpToolkit.registry.fetch("widgets") }
+
+  # The registered widgets resource is the shared fixture every executor example
+  # drives; named so each `described_class.call(resource:, ...)` reads off it.
+  subject(:resource) { McpToolkit.registry.fetch("widgets") }
 
   before do
     serializer = widget_serializer
     model = widget_model
     rel = relation
     McpToolkit.configure do |c|
+      # No ActiveRecord in the gem's own suite — inject a sanitizer that escapes
+      # LIKE wildcards the same way ActiveRecord's `sanitize_sql_like` would.
+      c.sql_sanitizer = FakeSqlSanitizer.new
       c.registry.register(:widgets) do
         model model
         serializer serializer

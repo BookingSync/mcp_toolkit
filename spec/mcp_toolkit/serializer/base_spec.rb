@@ -3,7 +3,7 @@
 require "spec_helper"
 
 RSpec.describe McpToolkit::Serializer::Base do
-  let(:serializer) do
+  subject(:serializer) do
     model = order_model
     Class.new(described_class) do
       attributes :id, :total, :created_at
@@ -76,9 +76,9 @@ RSpec.describe McpToolkit::Serializer::Base do
 
   describe "injection: a custom serializer satisfying only the contract" do
     # A serializer that is NOT a subclass of Base — it only implements the two
-    # contract methods. Stands in for an existing API- or Prometheus-derived
-    # serializer. The executor must work with it unchanged.
-    let(:custom_serializer) do
+    # contract methods. Stands in for an app's existing serializer. The executor
+    # must work with it unchanged.
+    subject(:custom_serializer) do
       Class.new do
         def self.serialize_one(record, scope: nil)
           { custom: true, id: record.id, scope: scope }

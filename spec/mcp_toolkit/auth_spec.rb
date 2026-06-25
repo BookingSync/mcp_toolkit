@@ -24,6 +24,10 @@ RSpec.describe "Authentication" do
   end
 
   describe McpToolkit::Auth::Introspection do
+    # The canonical introspection of a valid accounts_user token; examples that
+    # need other shapes call described_class.call with their own token/stub.
+    subject(:introspection_result) { described_class.call("good") }
+
     before { configure_satellite! }
 
     it "parses a valid response into a Result" do
@@ -33,13 +37,11 @@ RSpec.describe "Authentication" do
                 expires_at: nil, scopes: ["notifications__read"] }
       )
 
-      result = described_class.call("good")
-
-      expect(result).to be_valid
-      expect(result).to be_accounts_user
-      expect(result.account_id).to eq(42)
-      expect(result.scopes).to eq(["notifications__read"])
-      expect(result.authorized_for_scope?("notifications__read")).to be(true)
+      expect(introspection_result).to be_valid
+      expect(introspection_result).to be_accounts_user
+      expect(introspection_result.account_id).to eq(42)
+      expect(introspection_result.scopes).to eq(["notifications__read"])
+      expect(introspection_result.authorized_for_scope?("notifications__read")).to be(true)
     end
 
     it "derives per-scope authorization purely from scopes" do
@@ -59,18 +61,50 @@ RSpec.describe "Authentication" do
       expect(result.authorized_for_scope?("billing__read")).to be(false)
     end
 
-    it "treats empty/absent token scopes as unrestricted (backward-compat)" do
+    it "allows a tool that requires NO scope when token scopes are empty" do
       stub_introspect(
-        token: "unrestricted",
+        token: "no_scopes",
         body: { valid: true, kind: "user", account_id: nil, account_ids: [1], expires_at: nil, scopes: [] }
       )
 
-      result = described_class.call("unrestricted")
+      result = described_class.call("no_scopes")
 
-      expect(result.authorized_for_scope?("anything__read")).to be(true)
+      # A tool requiring no scope (empty required scope) is reachable by any valid token.
+      expect(result.authorized_for_scope?("")).to be(true)
+      expect(result.authorized_for_scope?(nil)).to be(true)
     end
 
-    it "treats an empty required scope as authorized" do
+    it "does NOT allow a tool that requires SOME scope when token scopes are empty" do
+      stub_introspect(
+        token: "no_scopes",
+        body: { valid: true, kind: "user", account_id: nil, account_ids: [1], expires_at: nil, scopes: [] }
+      )
+
+      result = described_class.call("no_scopes")
+
+      # Empty token scopes is unrestricted ONLY for tools that require no scope:
+      # a tool requiring a scope is NOT reachable.
+      expect(result.authorized_for_scope?("anything__read")).to be(false)
+    end
+
+    it "allows iff the required scope is present in the token's scopes" do
+      stub_introspect(
+        token: "mixed",
+        body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42],
+                expires_at: nil, scopes: %w[notifications__read billing__read] }
+      )
+
+      result = described_class.call("mixed")
+
+      # required scope present -> allowed
+      expect(result.authorized_for_scope?("notifications__read")).to be(true)
+      expect(result.authorized_for_scope?("billing__read")).to be(true)
+      # required scope absent -> not allowed
+      expect(result.authorized_for_scope?("notifications__write")).to be(false)
+      expect(result.authorized_for_scope?("other__read")).to be(false)
+    end
+
+    it "treats an empty required scope as authorized regardless of token scopes" do
       result = McpToolkit::Auth::Introspection::Result.new(valid: true, scopes: ["notifications__read"])
 
       expect(result.authorized_for_scope?("")).to be(true)
@@ -171,6 +205,10 @@ RSpec.describe "Authentication" do
   end
 
   describe McpToolkit::Auth::Authenticator do
+    # The canonical resolution of an accounts_user token; examples that exercise
+    # superuser / mismatch paths call described_class.call with their own args.
+    subject(:authenticated_context) { described_class.call(token: "au") }
+
     before { configure_satellite! }
 
     it "resolves an accounts_user token to its bound, locally-mapped scope root" do
@@ -179,9 +217,7 @@ RSpec.describe "Authentication" do
         body: { valid: true, kind: "accounts_user", account_id: 42, account_ids: [42], scopes: ["notifications__read"] }
       )
 
-      context = described_class.call(token: "au")
-
-      expect(context.scope_root).to eq(:local_account_42)
+      expect(authenticated_context.scope_root).to eq(:local_account_42)
     end
 
     it "resolves any valid token regardless of scope (scope enforcement lives at the tool layer)" do
@@ -232,6 +268,9 @@ RSpec.describe "Authentication" do
   end
 
   describe McpToolkit::Auth::Authority do
+    # The authority module under test (a collection of module-level helpers).
+    subject(:authority) { described_class }
+
     # A token object matching the documented duck-typed contract.
     let(:token_class) do
       Struct.new(:kind, :account_id, :account_ids, :expires_at, :scopes, keyword_init: true) do
@@ -253,16 +292,16 @@ RSpec.describe "Authentication" do
         c.token_authenticator = ->(plaintext) { plaintext == "secret" ? token : nil }
       end
 
-      authenticated = described_class.authenticate("secret")
+      authenticated = authority.authenticate("secret")
 
       expect(authenticated).to eq(token)
       expect(token).to be_touched
-      expect(described_class.authenticate("nope")).to be_nil
+      expect(authority.authenticate("nope")).to be_nil
     end
 
     it "raises ConfigurationError if no token_authenticator is set" do
       McpToolkit.config.auth_role = :authority
-      expect { described_class.authenticate("x") }
+      expect { authority.authenticate("x") }
         .to raise_error(McpToolkit::Errors::ConfigurationError, /token_authenticator/)
     end
 
@@ -270,7 +309,7 @@ RSpec.describe "Authentication" do
       token = token_class.new(kind: :accounts_user, account_id: 42, account_ids: [42],
                               expires_at: Time.utc(2026, 12, 31), scopes: ["notifications__read"])
 
-      payload = described_class.introspection_payload(token)
+      payload = authority.introspection_payload(token)
 
       expect(payload).to eq(
         valid: true,
@@ -286,14 +325,14 @@ RSpec.describe "Authentication" do
       token = token_class.new(kind: :accounts_user, account_id: 42, account_ids: [42],
                               expires_at: nil, scopes: ["notifications__read"])
 
-      expect(described_class.introspection_payload(token)).not_to have_key(:applications)
+      expect(authority.introspection_payload(token)).not_to have_key(:applications)
     end
 
     it "nulls account_id for a superuser/multi-account token" do
       token = token_class.new(kind: :user, account_id: nil, account_ids: [1, 2],
                               expires_at: nil, scopes: [])
 
-      payload = described_class.introspection_payload(token)
+      payload = authority.introspection_payload(token)
 
       expect(payload[:kind]).to eq("user")
       expect(payload[:account_id]).to be_nil
@@ -305,13 +344,13 @@ RSpec.describe "Authentication" do
       token = token_class.new(kind: :accounts_user, account_id: 42, account_ids: [42],
                               expires_at: nil, scopes: nil)
 
-      expect(described_class.introspection_payload(token)[:scopes]).to eq([])
+      expect(authority.introspection_payload(token)[:scopes]).to eq([])
     end
 
     it "round-trips: an authority payload is consumed by the satellite Introspection parser" do
       token = token_class.new(kind: :accounts_user, account_id: 42, account_ids: [42],
                               expires_at: nil, scopes: ["notifications__read"])
-      payload = described_class.introspection_payload(token)
+      payload = authority.introspection_payload(token)
 
       configure_satellite!
       stub_request(:post, introspect_endpoint).to_return(

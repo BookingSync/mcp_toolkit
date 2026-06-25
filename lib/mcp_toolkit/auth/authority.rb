@@ -19,18 +19,16 @@
 #                       else nil
 #   #account_ids     -> Array of authorized account ids
 #   #expires_at      -> a Time/DateTime responding to #iso8601, or nil
-#   #scopes          -> Array of OAuth-style `<app>__<action>` scopes ([] = unrestricted).
+#   #scopes          -> Array of OAuth-style `<app>__<action>` scopes ([] = no scopes).
 #                       The sole authorization source on the satellite side.
 #
 # Optionally `#touch_last_used!` (called after a successful authenticate if
 # present). A typical app token model (e.g. `McpToken`) satisfies this.
 module McpToolkit::Auth::Authority
-  module_function
-
   # Authenticate a plaintext bearer locally. Returns the token object or nil.
   # Calls `touch_last_used!` on the token if it responds to it (throttled
   # last-used tracking is the token model's concern, not ours).
-  def authenticate(plaintext, config: McpToolkit.config)
+  def self.authenticate(plaintext, config: McpToolkit.config)
     authenticator = config.token_authenticator
     if authenticator.nil?
       raise McpToolkit::Errors::ConfigurationError,
@@ -50,7 +48,7 @@ module McpToolkit::Auth::Authority
   #
   # @param token [#kind, #account_id, #account_ids, #expires_at, #scopes]
   # @return [Hash]
-  def introspection_payload(token)
+  def self.introspection_payload(token)
     account_ids = Array(token.account_ids)
     {
       valid: true,
@@ -63,15 +61,15 @@ module McpToolkit::Auth::Authority
   end
 
   # The payload returned for a missing/invalid token. Render with HTTP 401.
-  def invalid_payload
+  def self.invalid_payload
     { valid: false }
   end
 
   # account_id is the single bound account for an accounts_user token, else nil
   # (a superuser/multi-account token advertises its set via account_ids).
-  def account_id_for(token, account_ids)
-    return token.account_id if token.respond_to?(:account_id) && token.account_id
+  def self.account_id_for(token, account_ids)
+    return token.account_id unless token.account_id.nil?
 
-    token.kind.to_s == "accounts_user" ? account_ids.first : nil
+    token.kind.to_s == McpToolkit::TokenKinds::ACCOUNTS_USER ? account_ids.first : nil
   end
 end

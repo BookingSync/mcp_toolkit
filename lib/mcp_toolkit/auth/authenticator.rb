@@ -41,11 +41,11 @@ class McpToolkit::Auth::Authenticator
   end
 
   def call
-    introspection = McpToolkit::Auth::Introspection.call(@token, config: @config)
+    introspection = McpToolkit::Auth::Introspection.call(token, config:)
     raise McpToolkit::Errors::Unauthorized, "invalid or expired token" unless introspection.valid?
 
     central_account_id = resolve_account_id(introspection)
-    scope_root = @config.account_resolver.call(central_account_id)
+    scope_root = config.account_resolver.call(central_account_id)
     unless scope_root
       raise McpToolkit::Errors::Unauthorized, "no local scope found for account_id=#{central_account_id}"
     end
@@ -54,6 +54,8 @@ class McpToolkit::Auth::Authenticator
   end
 
   private
+
+  attr_reader :token, :meta, :arguments, :header_account_id, :config
 
   def resolve_account_id(introspection)
     candidate = candidate_account_id
@@ -72,7 +74,7 @@ class McpToolkit::Auth::Authenticator
     if candidate.blank?
       raise McpToolkit::Errors::Unauthorized,
             "this token spans multiple accounts; an account must be selected " \
-            "via _meta[\"#{@config.account_meta_key}\"] (or the account_id argument)"
+            "via _meta[\"#{config.account_meta_key}\"] (or the account_id argument)"
     end
 
     unless introspection.authorized_account_ids.include?(candidate.to_i)
@@ -83,8 +85,8 @@ class McpToolkit::Auth::Authenticator
   end
 
   def candidate_account_id
-    @meta[@config.account_meta_key].presence ||
-      @arguments["account_id"].presence ||
-      @header_account_id.presence
+    meta[config.account_meta_key].presence ||
+      arguments["account_id"].presence ||
+      header_account_id.presence
   end
 end

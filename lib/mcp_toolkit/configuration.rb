@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "active_support/cache"
-
 # The single, injectable configuration object for an app's MCP server.
 #
 # Generic but OPINIONATED: every setting has a sensible, vendor-neutral default,
@@ -27,11 +25,10 @@ class McpToolkit::Configuration
   # The DEFAULT serializer base class. A `Resource` registration that does not
   # supply its own `serializer` inherits nothing here — serializers are picked
   # per-resource — but this is the class the gem ships and documents as the base
-  # to subclass. Apps that want their own existing serializers (e.g. an API- or
-  # Prometheus-derived serializer) simply register resources with those classes
-  # instead; the gem
-  # only requires that a serializer responds to `serialize_one` /
-  # `serialize_collection` (see McpToolkit::Serializer::Base for the contract).
+  # to subclass. Apps that want their own existing serializers simply register
+  # resources with those classes instead; the gem only requires that a serializer
+  # responds to `serialize_one` / `serialize_collection` (see
+  # McpToolkit::Serializer::Base for the contract).
   #
   # @return [Class]
   # The reader is defined below as a lazily-defaulting method; only the writer
@@ -89,9 +86,9 @@ class McpToolkit::Configuration
   #   c.token_authenticator = ->(plaintext) { McpToken.authenticate(plaintext) }
   #
   # The returned token object must respond to the methods
-  # `McpToolkit::Auth::IntrospectionPayload` reads (see that class for the
-  # contract): `kind`, `account_id`, `account_ids`, `expires_at`,
-  # `application_keys`. A `touch_last_used!` method, if present, is called.
+  # `McpToolkit::Auth::Authority#introspection_payload` reads (see that module for
+  # the contract): `kind`, `account_id`, `account_ids`, `expires_at`, `scopes`. A
+  # `touch_last_used!` method, if present, is called.
   #
   # @return [#call, nil]
   attr_accessor :token_authenticator
@@ -109,6 +106,16 @@ class McpToolkit::Configuration
 
   # @return [Integer] session sliding-TTL in seconds.
   attr_accessor :session_ttl
+
+  # --- filtering -------------------------------------------------------------
+
+  # Escapes LIKE wildcards in `matches` / `does_not_match` filter values so they
+  # match literally. Must respond to `sanitize_sql_like(string)`. Defaults to the
+  # ActiveRecord-backed McpToolkit::SqlSanitizer; a non-Rails host (or a test) can
+  # inject its own.
+  #
+  # @return [#sanitize_sql_like]
+  attr_accessor :sql_sanitizer
 
   # --- protocol / transport --------------------------------------------------
 
@@ -154,6 +161,8 @@ class McpToolkit::Configuration
 
     @cache_store = ActiveSupport::Cache::MemoryStore.new
     @session_ttl = 3600 # 1 hour
+
+    @sql_sanitizer = McpToolkit::SqlSanitizer.new
 
     @protocol_version = nil
     @account_meta_key = "mcp-toolkit/account-id"

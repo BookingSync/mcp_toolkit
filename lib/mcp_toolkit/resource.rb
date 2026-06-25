@@ -12,8 +12,7 @@
 #
 # The `serializer` is INJECTABLE per resource: it may be a subclass of the gem's
 # `McpToolkit::Serializer::Base`, or any class satisfying the serializer contract
-# (`serialize_one` / `serialize_collection`) — e.g. an existing API- or
-# Prometheus-derived serializer.
+# (`serialize_one` / `serialize_collection`) — e.g. an app's existing serializer.
 class McpToolkit::Resource
   class NotConfigured < StandardError; end
 
@@ -57,8 +56,8 @@ class McpToolkit::Resource
   #   filterable booking_id: :synced_booking_id
   #
   # A declared key accepts both a bare equality value AND operator-based
-  # conditions (`{ op:, value: }` or an array of them, ANDed) the same way API v3
-  # does — see McpToolkit::Filtering for the supported operators per column type.
+  # conditions (`{ op:, value: }` or an array of them, ANDed) — see
+  # McpToolkit::Filtering for the supported operators per column type.
   #
   # Unmapped/unknown keys are rejected by the list executor, never silently
   # dropped, so a typo surfaces as actionable feedback.
@@ -86,26 +85,26 @@ class McpToolkit::Resource
   # The account-scoped relation for this resource. Raises if misconfigured so a
   # registry mistake fails loudly rather than leaking an unscoped query.
   def resolve_relation(scope_root)
-    raise NotConfigured, "resource #{@name.inspect} has no scope block" unless @scope_block
-    raise NotConfigured, "resource #{@name.inspect} has no model" unless @model
-    raise NotConfigured, "resource #{@name.inspect} has no serializer" unless @serializer
+    raise NotConfigured, "resource #{name.inspect} has no scope block" unless scope
+    raise NotConfigured, "resource #{name.inspect} has no model" unless model
+    raise NotConfigured, "resource #{name.inspect} has no serializer" unless serializer
 
-    @scope_block.call(scope_root)
+    scope.call(scope_root)
   end
 
   # Serialized attribute names (the response shape), read off the serializer's
   # declared attributes. Requires a serializer that exposes `declared_attributes`
   # (the gem's base does); resource_schema degrades gracefully otherwise.
   def attribute_names
-    return [] unless @serializer.respond_to?(:declared_attributes)
+    return [] unless serializer.respond_to?(:declared_attributes)
 
-    @serializer.declared_attributes.map(&:to_sym)
+    serializer.declared_attributes.map(&:to_sym)
   end
 
   # Association descriptors (the `links` shape) read off the serializer.
   def association_descriptors
-    return [] unless @serializer.respond_to?(:declared_associations)
+    return [] unless serializer.respond_to?(:declared_associations)
 
-    @serializer.declared_associations
+    serializer.declared_associations
   end
 end

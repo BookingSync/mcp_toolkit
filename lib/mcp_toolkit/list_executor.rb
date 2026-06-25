@@ -3,14 +3,13 @@
 # Runs a read-only, paginated "list" query for a registered resource, rooted on
 # the scoped relation. Supports the standard `ids`, `updated_since`, `limit`,
 # `offset` filters plus the resource's declared per-attribute filters (equality
-# AND operator-based, matching API v3 — see McpToolkit::Filtering), and serializes
-# via the resource's serializer, producing the `{ <root> => [...], meta: {...} }`
-# wrapper.
+# AND operator-based — see McpToolkit::Filtering), and serializes via the
+# resource's serializer, producing the `{ <root> => [...], meta: {...} }` wrapper.
 class McpToolkit::ListExecutor
   DEFAULT_LIMIT = 25
   MAX_LIMIT = 100
   # Column types whose primary key sorts naturally by `id`. Anything else (e.g. a
-  # string/uuid PK) sorts by `created_at` instead, matching API v3.
+  # string/uuid PK) sorts by `created_at` instead.
   NUMERIC_PK_TYPES = %i[integer bigint].freeze
 
   def self.call(resource:, scope_root:, params:)
@@ -28,15 +27,17 @@ class McpToolkit::ListExecutor
     total_count = relation.count
     rows = paginate(relation).to_a
 
-    @resource.serializer.serialize_collection(
-      rows, scope: @scope_root, total_count:, limit:, offset:
+    resource.serializer.serialize_collection(
+      rows, scope: scope_root, total_count:, limit:, offset:
     )
   end
 
   private
 
+  attr_reader :resource, :scope_root, :params
+
   def build_relation
-    relation = @resource.resolve_relation(@scope_root)
+    relation = resource.resolve_relation(scope_root)
     relation = apply_ids(relation)
     relation = apply_updated_since(relation)
     relation = apply_attribute_filters(relation)
@@ -44,13 +45,13 @@ class McpToolkit::ListExecutor
   end
 
   # Order by `id` when the primary key is numeric; otherwise by `created_at`
-  # (a non-numeric PK does not sort meaningfully). Matches API v3.
+  # (a non-numeric PK does not sort meaningfully).
   def apply_order(relation)
     relation.order(numeric_primary_key? ? :id : :created_at)
   end
 
   def numeric_primary_key?
-    model = @resource.model
+    model = resource.model
     return true unless model.respond_to?(:columns_hash) && model.respond_to?(:primary_key)
 
     pk = model.primary_key
@@ -64,16 +65,16 @@ class McpToolkit::ListExecutor
   # Each request-facing key is resolved against the resource's declared allowlist
   # (`Resource#filterable`) to its backing column, then added as WHERE clause(s) on
   # TOP of the already scoped relation — filtering composes with scoping and can
-  # only ever NARROW it, never widen it. Equality and operator-based (API v3)
-  # semantics are delegated to McpToolkit::Filtering.
+  # only ever NARROW it, never widen it. Equality and operator-based semantics are
+  # delegated to McpToolkit::Filtering.
   #
   # Unknown filter keys are rejected with InvalidParams, so the caller gets
   # actionable feedback instead of a silently-ignored filter.
   def apply_attribute_filters(relation)
-    filter = @params[:filter]
+    filter = params[:filter]
     return relation if filter.blank?
 
-    mapping = @resource.filterable_columns
+    mapping = resource.filterable_columns
     validate_filter_keys!(filter, mapping)
 
     filter.each do |request_key, value|
@@ -97,16 +98,16 @@ class McpToolkit::ListExecutor
   end
 
   def apply_ids(relation)
-    return relation if @params[:ids].blank?
+    return relation if params[:ids].blank?
 
-    ids = @params[:ids].to_s.split(",").map(&:strip).compact_blank
+    ids = params[:ids].to_s.split(",").map(&:strip).compact_blank
     ids.empty? ? relation : relation.where(id: ids)
   end
 
   def apply_updated_since(relation)
-    return relation if @params[:updated_since].blank?
+    return relation if params[:updated_since].blank?
 
-    time = parse_time(@params[:updated_since])
+    time = parse_time(params[:updated_since])
     relation.where("#{relation.table_name}.updated_at > ?", time)
   end
 
@@ -121,11 +122,11 @@ class McpToolkit::ListExecutor
   end
 
   def limit
-    raw = @params[:limit] || DEFAULT_LIMIT
+    raw = params[:limit] || DEFAULT_LIMIT
     [[raw.to_i, 1].max, MAX_LIMIT].min # rubocop:disable Style/ComparableClamp
   end
 
   def offset
-    [@params[:offset].to_i, 0].max
+    [params[:offset].to_i, 0].max
   end
 end

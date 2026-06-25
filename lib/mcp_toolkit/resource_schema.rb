@@ -32,8 +32,8 @@ class McpToolkit::ResourceSchema
 
   def call
     {
-      name: @resource.name,
-      description: @resource.description,
+      name: resource.name,
+      description: resource.description,
       attributes:,
       relationships:,
       standard_filters: STANDARD_FILTERS,
@@ -43,8 +43,10 @@ class McpToolkit::ResourceSchema
 
   private
 
+  attr_reader :resource, :model
+
   def attributes
-    @resource.attribute_names.map { |name| attribute_schema(name) }
+    resource.attribute_names.map { |name| attribute_schema(name) }
   end
 
   def attribute_schema(name)
@@ -62,7 +64,7 @@ class McpToolkit::ResourceSchema
   # it matches against, and the column's type — self-describing so an MCP client
   # can construct a valid filter without trial and error.
   def filters
-    @resource.filterable_columns.sort.map do |request_key, column|
+    resource.filterable_columns.sort.map do |request_key, column|
       type = column_type(column)
       {
         key: request_key,
@@ -77,13 +79,13 @@ class McpToolkit::ResourceSchema
   # A filter key may be a public alias (e.g. booking_id -> synced_booking_id) so
   # we match on either the request key or the column.
   def filterable_column_for(attribute_name)
-    @resource.filterable_columns.find do |request_key, column|
+    resource.filterable_columns.find do |request_key, column|
       request_key.to_s == attribute_name.to_s || column.to_s == attribute_name.to_s
     end
   end
 
   def relationships
-    @resource.association_descriptors.map do |association|
+    resource.association_descriptors.map do |association|
       {
         name: association.links_key,
         kind: association.type.to_s,
@@ -95,8 +97,8 @@ class McpToolkit::ResourceSchema
   # Reads an attribute's DB column type, tolerating models that don't expose
   # `columns_hash` (returns nil => the attribute is reported as "computed").
   def column_type(name)
-    return nil unless @model.respond_to?(:columns_hash)
+    return nil unless model.respond_to?(:columns_hash)
 
-    @model.columns_hash[name.to_s]&.type
+    model.columns_hash[name.to_s]&.type
   end
 end

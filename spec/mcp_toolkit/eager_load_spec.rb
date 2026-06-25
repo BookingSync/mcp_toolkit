@@ -8,7 +8,9 @@ require "spec_helper"
 # `NameError: uninitialized constant`), so this guards the flat-declaration +
 # split-file layout against regressions.
 RSpec.describe "Zeitwerk eager loading" do
+  subject(:eager_load) { -> { Zeitwerk::Registry.loaders.each(&:eager_load) } }
+
   it "loads the entire gem tree without error" do
-    expect { Zeitwerk::Registry.loaders.each(&:eager_load) }.not_to raise_error
+    expect(&eager_load).not_to raise_error
   end
 end

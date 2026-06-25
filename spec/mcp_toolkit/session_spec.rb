@@ -5,10 +5,10 @@ require "spec_helper"
 RSpec.describe McpToolkit::Session do
   # The default config ships an ActiveSupport::Cache::MemoryStore, which is enough
   # to exercise create/find/delete + sliding TTL behavior.
+  subject(:session) { described_class.create! }
+
   describe ".create!" do
     it "mints an opaque id and persists the session in the cache" do
-      session = described_class.create!
-
       expect(session.id).to match(/\A[0-9a-f-]{36}\z/)
       expect(described_class.find(session.id)).to be_a(described_class)
     end
@@ -22,13 +22,12 @@ RSpec.describe McpToolkit::Session do
     end
 
     it "returns a session for a known id" do
-      id = described_class.create!.id
+      id = session.id
 
       expect(described_class.find(id).id).to eq(id)
     end
 
     it "slides the TTL on every successful lookup" do
-      session = described_class.create!
       McpToolkit.config.session_ttl = 100
 
       expect(McpToolkit.config.cache_store).to receive(:write).with(
@@ -41,7 +40,7 @@ RSpec.describe McpToolkit::Session do
 
   describe ".delete" do
     it "removes the session" do
-      id = described_class.create!.id
+      id = session.id
 
       described_class.delete(id)
 

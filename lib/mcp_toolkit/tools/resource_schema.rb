@@ -24,14 +24,12 @@ class McpToolkit::Tools::ResourceSchema < McpToolkit::Tools::Base
     required: ["resource"]
   )
 
-  class << self
-    def call(server_context:, resource: nil, **_args)
-      config = config_from(server_context)
-      with_authentication(server_context) do
-        raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
+  def self.call(server_context:, resource: nil, **_args)
+    config = config_from(server_context)
+    with_authentication(server_context) do
+      raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
 
-        McpToolkit::ResourceSchema.call(lookup_resource(resource, config))
-      end
+      McpToolkit::ResourceSchema.call(lookup_resource(resource, config))
     end
   end
 end

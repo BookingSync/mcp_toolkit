@@ -9,6 +9,13 @@ require "rubocop/rake_task"
 
 RuboCop::RakeTask.new
 
-# Convenience "everything" task for local runs. CI (GitHub Actions) keeps these
-# as separate jobs (test / rubocop / brakeman) so failures stay isolated.
-task default: %i[spec rubocop]
+# Run brakeman with the same flags CI uses, so a local `rake` catches what the
+# pipeline would.
+desc "Run Brakeman security scanner"
+task :brakeman do
+  sh "bundle exec brakeman --force --no-progress --quiet --no-pager"
+end
+
+# Convenience "everything" task for local runs — mirrors CI (which keeps these as
+# separate jobs: test / rubocop / brakeman) so a green `rake` means a green build.
+task default: %i[spec rubocop brakeman]

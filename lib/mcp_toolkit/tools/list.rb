@@ -53,15 +53,13 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
     required: ["resource"]
   )
 
-  class << self
-    def call(server_context:, resource: nil, account_id: nil, **params)
-      config = config_from(server_context)
-      with_account(server_context, account_id:) do |scope_root|
-        raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
+  def self.call(server_context:, resource: nil, account_id: nil, **params)
+    config = config_from(server_context)
+    with_account(server_context, account_id:) do |scope_root|
+      raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
 
-        descriptor = lookup_resource(resource, config)
-        McpToolkit::ListExecutor.call(resource: descriptor, scope_root:, params:)
-      end
+      descriptor = lookup_resource(resource, config)
+      McpToolkit::ListExecutor.call(resource: descriptor, scope_root:, params:)
     end
   end
 end

@@ -19,7 +19,9 @@ class McpToolkit::Tools::Get < McpToolkit::Tools::Base
         type: "string",
         description: "Resource name (use the `resources` tool to discover valid values)"
       },
-      id: { type: "integer", description: "The record ID" },
+      # The id type is left open so a string/UUID primary key works as well as an
+      # integer one; the record is looked up by the value as given, uncoerced.
+      id: { type: %w[string integer], description: "The record ID (integer or string/UUID)" },
       account_id: {
         type: "integer",
         description: "Account to operate on. Required for superuser tokens; ignored otherwise."
@@ -28,15 +30,13 @@ class McpToolkit::Tools::Get < McpToolkit::Tools::Base
     required: %w[resource id]
   )
 
-  class << self
-    def call(server_context:, resource: nil, id: nil, account_id: nil, **_args)
-      config = config_from(server_context)
-      with_account(server_context, account_id:) do |scope_root|
-        raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
+  def self.call(server_context:, resource: nil, id: nil, account_id: nil, **_args)
+    config = config_from(server_context)
+    with_account(server_context, account_id:) do |scope_root|
+      raise McpToolkit::Errors::InvalidParams, "resource is required" if resource.to_s.strip.empty?
 
-        descriptor = lookup_resource(resource, config)
-        McpToolkit::GetExecutor.call(resource: descriptor, scope_root:, id:)
-      end
+      descriptor = lookup_resource(resource, config)
+      McpToolkit::GetExecutor.call(resource: descriptor, scope_root:, id:)
     end
   end
 end

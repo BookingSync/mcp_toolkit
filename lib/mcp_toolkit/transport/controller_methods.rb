@@ -1,8 +1,5 @@
 # frozen_string_literal: true
 
-require "active_support/concern"
-require "json"
-
 # The MCP Streamable-HTTP transport, provided as an includable concern. An
 # app's controller includes this to get the full transport with no per-app code:
 #

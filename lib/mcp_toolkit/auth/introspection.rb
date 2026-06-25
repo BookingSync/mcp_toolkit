@@ -1,10 +1,5 @@
 # frozen_string_literal: true
 
-require "digest"
-require "json"
-require "time"
-require "faraday"
-
 # SATELLITE side. Authenticates the bearer token the central app forwards by
 # calling the central app's introspection endpoint, with a short-TTL cache so a
 # burst of tool calls in one session does not hammer the central app.
@@ -14,18 +9,19 @@ require "faraday"
 #
 # Response contract (the AUTHORITY emits this; see Auth::Authority):
 #   { valid: bool,
-#     kind: "accounts_user" | "user",
+#     kind: <one of McpToolkit::TokenKinds — accounts-user or superuser>,
 #     account_id: <id|null>,
 #     account_ids: [...],
 #     expires_at: <iso8601|null>,
-#     scopes: [...] }   # OAuth-style `<app>__<action>` scopes; [] / null = unrestricted
+#     scopes: [...] }   # OAuth-style `<app>__<action>` scopes a token carries
 #
 # Authorization is purely scope-based: a token reaches a tool when it carries
-# the exact `<app>__<action>` scope that tool requires (enforced in
+# every `<app>__<action>` scope that tool requires (enforced in
 # Tools::Base#with_account / #with_authentication via `authorized_for_scope?`).
 #
 # The cache is keyed on a SHA-256 of the token (never the plaintext) so cached
-# entries can't be reversed back to a usable credential from cache storage.
+# entries can't be reversed back to a usable credential from cache storage. The
+# HTTP call itself is delegated to Auth::AuthorityServerClient.
 class McpToolkit::Auth::Introspection
   CACHE_PREFIX = "mcp_toolkit:introspection:"
 
@@ -72,22 +68,22 @@ class McpToolkit::Auth::Introspection
     public
 
     def accounts_user?
-      kind.to_s == "accounts_user"
+      kind.to_s == McpToolkit::TokenKinds::ACCOUNTS_USER
     end
 
     def superuser?
-      kind.to_s == "user"
+      kind.to_s == McpToolkit::TokenKinds::USER
     end
 
     # True when the token carries the EXACT `required_scope` (e.g.
-    # `notifications__read`). NULL/empty scopes = unrestricted (backward-compat);
-    # an empty required scope passes.
+    # `notifications__read`). An empty required scope passes (a tool that
+    # requires no scope is reachable by any valid token). A non-empty required
+    # scope must be present in the token's `scopes`; empty token scopes are
+    # therefore unrestricted ONLY for tools that require no scope.
     def authorized_for_scope?(required_scope)
       return true if required_scope.to_s.empty?
 
       scope_list = Array(scopes).map(&:to_s)
-      return true if scope_list.empty? # unrestricted token
-
       scope_list.include?(required_scope.to_s)
     end
 
@@ -98,12 +94,10 @@ class McpToolkit::Auth::Introspection
 
   INVALID = Result.new(valid: false).freeze
 
-  class << self
-    # Returns an Introspection::Result. Invalid/expired/unreachable => a result
-    # whose `valid?` is false. Caches positive AND negative results briefly.
-    def call(token, config: McpToolkit.config)
-      new(token, config:).call
-    end
+  # Returns an Introspection::Result. Invalid/expired/unreachable => a result
+  # whose `valid?` is false. Caches positive AND negative results briefly.
+  def self.call(token, config: McpToolkit.config)
+    new(token, config:).call
   end
 
   def initialize(token, config: McpToolkit.config)
@@ -112,29 +106,25 @@ class McpToolkit::Auth::Introspection
   end
 
   def call
-    return INVALID if @token.to_s.empty?
+    return INVALID if token.to_s.empty?
 
     cached = cache.read(cache_key)
     return cached if cached
 
     result = fetch
-    cache.write(cache_key, result, expires_in: @config.introspection_cache_ttl)
+    cache.write(cache_key, result, expires_in: config.introspection_cache_ttl)
     result
   end
 
   private
 
+  attr_reader :token, :config
+
   def fetch
-    response = connection.post(@config.introspect_url) do |request|
-      request.headers["Authorization"] = "Bearer #{@token}"
-      request.headers["Accept"] = "application/json"
-    end
+    body = authority_server_client.introspect(token)
+    return INVALID if body.nil?
 
-    return INVALID unless response.status == 200
-
-    parse(response.body)
-  rescue Faraday::Error
-    INVALID
+    parse(body)
   end
 
   def parse(body)
@@ -153,21 +143,15 @@ class McpToolkit::Auth::Introspection
     INVALID
   end
 
+  def authority_server_client
+    McpToolkit::Auth::AuthorityServerClient.new(config)
+  end
+
   def cache
-    @config.cache_store
+    config.cache_store
   end
 
   def cache_key
-    "#{CACHE_PREFIX}#{Digest::SHA256.hexdigest(@token)}"
-  end
-
-  def connection
-    timeout = @config.introspection_timeout
-    Faraday.new do |conn|
-      conn.options.timeout = timeout
-      conn.options.open_timeout = timeout
-      conn.response :json, content_type: /\bjson$/
-      conn.adapter Faraday.default_adapter
-    end
+    "#{CACHE_PREFIX}#{Digest::SHA256.hexdigest(token)}"
   end
 end

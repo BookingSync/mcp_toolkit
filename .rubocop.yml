@@ -1,6 +1,5 @@
 plugins:
   - rubocop-performance
-  - rubocop-rspec
 
 AllCops:
   TargetRubyVersion: 3.2
@@ -10,6 +9,9 @@ AllCops:
     - "bin/**/*"
     - "vendor/**/*"
     - "tmp/**/*"
+    # Specs follow manual conventions (named subjects, in-example test doubles)
+    # that don't map cleanly to the library cops; they are not linted.
+    - "spec/**/*"
 
 # --- Layout -----------------------------------------------------------------
 
@@ -30,8 +32,13 @@ Style/ClassAndModuleChildren:
   Exclude:
     - "lib/mcp_toolkit.rb"
 
-# The gem (gemspec, Gemfile, lib, specs) is written with double-quoted strings;
-# match that convention instead of churning every literal.
+# Define class methods as `def self.x`, never `class << self` (so the singleton
+# style stays consistent and greppable across the gem).
+Style/ClassMethodsDefinitions:
+  EnforcedStyle: def_self
+
+# The gem (gemspec, Gemfile, lib) is written with double-quoted strings; match
+# that convention instead of churning every literal.
 Style/StringLiterals:
   EnforcedStyle: double_quotes
 
@@ -78,58 +85,14 @@ Metrics/ModuleLength:
 Metrics/BlockLength:
   Max: 50
   Exclude:
-    - "spec/**/*"
     - "*.gemspec"
     - "Gemfile"
 
 Metrics/ParameterLists:
   Max: 6
 
-# --- Naming (specs) ---------------------------------------------------------
-
-# `id` is a domain-meaningful record identifier; fake-AR helpers mirror
-# ActiveRecord's `offset(n)` / `limit(n)` signatures.
+# `id` is a domain-meaningful record identifier.
 Naming/MethodParameterName:
   AllowedNames:
     - id
     - n
-
-# Fixture identifiers like `:account_42` / id `42` are intentional, not magic
-# variable numbering to normalize.
-Naming/VariableNumber:
-  Exclude:
-    - "spec/**/*"
-
-# --- RSpec ------------------------------------------------------------------
-
-RSpec/ExampleLength:
-  Enabled: false
-
-RSpec/MultipleExpectations:
-  Enabled: false
-
-RSpec/NestedGroups:
-  Max: 5
-
-RSpec/MultipleMemoizedHelpers:
-  Enabled: false
-
-# Integration-style specs (data path, server end-to-end, Zeitwerk eager loading)
-# intentionally describe a behaviour with a string rather than a single class.
-RSpec/DescribeClass:
-  Exclude:
-    - "spec/mcp_toolkit/registry_and_executors_spec.rb"
-    - "spec/mcp_toolkit/server_end_to_end_spec.rb"
-    - "spec/mcp_toolkit/eager_load_spec.rb"
-
-# `@touched` lives on a test-double class defined inside the example, not on the
-# example scope; the cop misreads it as an example ivar.
-RSpec/InstanceVariable:
-  Exclude:
-    - "spec/mcp_toolkit/auth_spec.rb"
-
-# Asserting on a slid-TTL `write` is naturally expressed as a message
-# expectation here.
-RSpec/MessageSpies:
-  Exclude:
-    - "spec/mcp_toolkit/session_spec.rb"

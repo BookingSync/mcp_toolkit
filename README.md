@@ -18,7 +18,7 @@ into one versioned, standalone library, so a new app can add an MCP server in
   (`list` / `get` / `resources` / `resource_schema`) wrapping the official `mcp`
   gem's JSON-RPC core;
 - an **injectable serializer DSL** (the default base, or your own — e.g. an
-  existing API- or Prometheus-derived serializer).
+  existing app serializer).
 
 The JSON-RPC protocol, version negotiation, and error envelopes are delegated to
 the official `mcp` gem; this toolkit owns everything around it.
@@ -142,8 +142,9 @@ end
 
 The token object your authenticator returns must respond to:
 `kind` (`:accounts_user` | `:user`), `account_id`, `account_ids`, `expires_at`
-(an `#iso8601`-able time or nil), and `application_keys` (`[]` = unrestricted).
-Optionally `touch_last_used!`. A typical app token model (e.g. `McpToken`) fits.
+(an `#iso8601`-able time or nil), and `scopes` (an array of `<app>__<action>`
+scopes; `[]` = no scopes). Optionally `touch_last_used!`. A typical app token
+model (e.g. `McpToken`) fits.
 
 **2. Expose the introspection endpoint** the satellites call:
 
@@ -179,12 +180,11 @@ sets the authority config and registers resources + the transport controller.)
 
 ---
 
-## Serializer injection (e.g. an API-v3 / Prometheus-derived serializer)
+## Serializer injection (e.g. an existing app serializer)
 
 The registry takes a **serializer class per resource**. The gem ships a default
-DSL base (`McpToolkit::Serializer::Base`) extracted from bsa-notifications, but
-the only thing the executors require is that a serializer responds to two class
-methods:
+DSL base (`McpToolkit::Serializer::Base`), but the only thing the executors
+require is that a serializer responds to two class methods:
 
 ```ruby
 serializer.serialize_one(record, scope:)
@@ -195,12 +195,12 @@ serializer.serialize_collection(records, scope:, total_count:, limit:, offset:)
 ```
 
 Any class satisfying that contract slots in — including an app's existing
-API- or Prometheus-derived serializers. Register it directly:
+serializers. Register it directly:
 
 ```ruby
 McpToolkit.registry.register(:bookings) do
   model       Booking
-  serializer  Api::V3::BookingSerializer   # your existing API-v3 serializer
+  serializer  BookingSerializer   # your existing serializer
   scope { |account| account.bookings }
 end
 ```

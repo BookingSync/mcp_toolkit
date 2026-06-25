@@ -17,9 +17,9 @@
 #     #      meta: { total_count:, limit:, offset: } }
 #
 # ANY class implementing those two methods can be registered as a resource's
-# serializer — that is the seam that lets an app's existing API- or
-# Prometheus-derived serializers slot in unchanged alongside this base. The
-# `resource_schema` tool additionally reads `declared_attributes` and
+# serializer — that is the seam that lets an app's existing serializers slot in
+# unchanged alongside this base. The `resource_schema` tool additionally reads
+# `declared_attributes` and
 # `declared_associations` off the serializer (for shape discovery); a custom
 # serializer that wants to power `resource_schema` should expose those too, but
 # they are not required for `get` / `list`.
@@ -59,93 +59,95 @@ class McpToolkit::Serializer::Base
     end
   end
 
-  class << self
-    def attributes(*names)
-      names.each { |name| declared_attributes << name.to_sym }
+  def self.attributes(*names)
+    names.each { |name| declared_attributes << name.to_sym }
+  end
+
+  # belongs_to / has_one - single id (or {id:,type:} when polymorphic).
+  #
+  # `foreign_key:` overrides the FK method read for the id (defaults to
+  # `<name>_id`). Use it when the model's FK column doesn't follow the
+  # `<name>_id` convention - e.g.
+  # `has_one :account, foreign_key: :synced_account_id` so the link reports
+  # the central account id straight off the already-loaded column.
+  def self.has_one(name, key: nil, root: nil, serializer: nil, polymorphic: false, foreign_key: nil)
+    declared_associations << Association.new(
+      name: name.to_sym, type: :has_one, key: key || root, serializer:, polymorphic:, foreign_key:
+    )
+  end
+
+  # has_many / has_and_belongs_to_many - sorted array of ids.
+  def self.has_many(name, key: nil, root: nil, serializer: nil)
+    declared_associations << Association.new(
+      name: name.to_sym, type: :has_many, key: key || root, serializer:, polymorphic: false
+    )
+  end
+
+  # Declares attributes whose value is a `{ locale => translation }` hash.
+  # An instance method is defined for each attribute that delegates to
+  # `#translate`. Only meaningful for Globalize models; harmless otherwise
+  # (returns {}).
+  def self.translates(*names)
+    names.each do |name|
+      declared_attributes << name.to_sym unless declared_attributes.include?(name.to_sym)
+      define_method(name) { translate(name) }
     end
+  end
 
-    # belongs_to / has_one - single id (or {id:,type:} when polymorphic).
-    #
-    # `foreign_key:` overrides the FK method read for the id (defaults to
-    # `<name>_id`). Use it when the model's FK column doesn't follow the
-    # `<name>_id` convention - e.g.
-    # `has_one :account, foreign_key: :synced_account_id` so the link reports
-    # the central account id straight off the already-loaded column.
-    def has_one(name, key: nil, root: nil, serializer: nil, polymorphic: false, foreign_key: nil)
-      declared_associations << Association.new(
-        name: name.to_sym, type: :has_one, key: key || root, serializer:, polymorphic:, foreign_key:
-      )
+  def self.declared_attributes
+    @declared_attributes ||= []
+  end
+
+  def self.declared_associations
+    @declared_associations ||= []
+  end
+
+  # ---- entry points used by the executors (the injection contract) -----
+
+  # Serialize a single record to its attributes+links hash. nil-safe.
+  def self.serialize_one(record, scope: nil)
+    return nil if record.nil?
+
+    new(record, scope:).serializable_hash
+  end
+
+  # Serialize an array of records to the index wrapper, keyed by the
+  # pluralized resource name, with a `meta` pagination block.
+  def self.serialize_collection(records, scope: nil, total_count: nil, limit: nil, offset: nil)
+    rows = Array(records).map { |record| new(record, scope:).serializable_hash }
+    {
+      root_key => rows,
+      meta: { total_count: total_count.nil? ? rows.size : total_count, limit:, offset: }
+    }
+  end
+
+  # Pluralized resource name used as the collection root key, derived from
+  # the serialized model (`model.model_name.plural`).
+  def self.root_key
+    model_class.model_name.plural.to_sym
+  end
+
+  # Infer the serialized model from the serializer class name by stripping a
+  # trailing "Serializer" and the host namespace, e.g.
+  #   Mcp::NotificationSerializer            -> Notification
+  #   Mcp::PushNotifications::FilterSerializer -> PushNotifications::Filter
+  # Subclasses whose name doesn't follow the convention set `model_class`.
+  def self.model_class
+    @model_class ||= begin
+      without_suffix = name.delete_suffix("Serializer")
+      # Drop the leading serializer namespace segment (e.g. "Mcp::") so the
+      # remainder names the model. If there is no namespace, use as-is.
+      without_namespace = without_suffix.sub(/\A[^:]+::/, "")
+      (without_namespace.empty? ? without_suffix : without_namespace).constantize
     end
+  end
 
-    # has_many / has_and_belongs_to_many - sorted array of ids.
-    def has_many(name, key: nil, root: nil, serializer: nil)
-      declared_associations << Association.new(
-        name: name.to_sym, type: :has_many, key: key || root, serializer:, polymorphic: false
-      )
-    end
-
-    # Declares attributes whose value is a `{ locale => translation }` hash.
-    # An instance method is defined for each attribute that delegates to
-    # `#translate`. Only meaningful for Globalize models; harmless otherwise
-    # (returns {}).
-    def translates(*names)
-      names.each do |name|
-        declared_attributes << name.to_sym unless declared_attributes.include?(name.to_sym)
-        define_method(name) { translate(name) }
-      end
-    end
-
-    def declared_attributes
-      @declared_attributes ||= []
-    end
-
-    def declared_associations
-      @declared_associations ||= []
-    end
-
-    # ---- entry points used by the executors (the injection contract) -----
-
-    # Serialize a single record to its attributes+links hash. nil-safe.
-    def serialize_one(record, scope: nil)
-      return nil if record.nil?
-
-      new(record, scope:).serializable_hash
-    end
-
-    # Serialize an array of records to the index wrapper, keyed by the
-    # pluralized resource name, with a `meta` pagination block.
-    def serialize_collection(records, scope: nil, total_count: nil, limit: nil, offset: nil)
-      rows = Array(records).map { |record| new(record, scope:).serializable_hash }
-      {
-        root_key => rows,
-        meta: { total_count: total_count.nil? ? rows.size : total_count, limit:, offset: }
-      }
-    end
-
-    # Pluralized resource name used as the collection root key, derived from
-    # the serialized model (`model.model_name.plural`).
-    def root_key
-      model_class.model_name.plural.to_sym
-    end
-
-    # Infer the serialized model from the serializer class name by stripping a
-    # trailing "Serializer" and the host namespace, e.g.
-    #   Mcp::NotificationSerializer            -> Notification
-    #   Mcp::PushNotifications::FilterSerializer -> PushNotifications::Filter
-    # Subclasses whose name doesn't follow the convention set `model_class`.
-    def model_class
-      @model_class ||= begin
-        without_suffix = name.delete_suffix("Serializer")
-        # Drop the leading serializer namespace segment (e.g. "Mcp::") so the
-        # remainder names the model. If there is no namespace, use as-is.
-        without_namespace = without_suffix.sub(/\A[^:]+::/, "")
-        (without_namespace.empty? ? without_suffix : without_namespace).constantize
-      end
-    end
-
-    # Lets subclasses point at a model whose name doesn't follow the
-    # convention (e.g. namespacing differences).
-    attr_writer :model_class
+  # Lets subclasses point at a model whose name doesn't follow the
+  # convention (e.g. namespacing differences). Written as an explicit class
+  # method (not `attr_writer`, which would define an instance writer) to set the
+  # class-level @model_class the convention-inference memoizes.
+  def self.model_class=(klass) # rubocop:disable Style/TrivialAccessors
+    @model_class = klass
   end
 
   # ---- instance API ----------------------------------------------------

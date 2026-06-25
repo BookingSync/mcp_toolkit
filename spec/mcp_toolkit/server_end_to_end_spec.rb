@@ -59,6 +59,10 @@ RSpec.describe "Server end-to-end (tools/call)" do
     )
   end
 
+  # The canonical happy-path call: a `list` for the widgets resource with the
+  # default before-stub (token carries `widgets_app__read`).
+  subject(:list_response) { call_tool({ "resource" => "widgets" }) }
+
   def call_tool(arguments, bearer: "forwarded-token")
     server = McpToolkit::Server.build(server_context: { bearer_token: bearer, header_account_id: nil })
     request = {
@@ -71,10 +75,8 @@ RSpec.describe "Server end-to-end (tools/call)" do
   end
 
   it "returns the serialized collection as a text tool result" do
-    response = call_tool({ "resource" => "widgets" })
-
-    expect(response.dig("result", "isError")).to be_falsey
-    text = response.dig("result", "content", 0, "text")
+    expect(list_response.dig("result", "isError")).to be_falsey
+    text = list_response.dig("result", "content", 0, "text")
     payload = JSON.parse(text)
     expect(payload["widgets"].map { |w| w["id"] }).to eq([1, 2])
     expect(payload["meta"]).to include("total_count" => 2)
@@ -82,10 +84,8 @@ RSpec.describe "Server end-to-end (tools/call)" do
 
   it "allows a list call when the token carries the required <app>__read scope" do
     # the default before-stub already carries scopes: ["widgets_app__read"]
-    response = call_tool({ "resource" => "widgets" })
-
-    expect(response.dig("result", "isError")).to be_falsey
-    payload = JSON.parse(response.dig("result", "content", 0, "text"))
+    expect(list_response.dig("result", "isError")).to be_falsey
+    payload = JSON.parse(list_response.dig("result", "content", 0, "text"))
     expect(payload["widgets"].map { |w| w["id"] }).to eq([1, 2])
   end
 
