@@ -40,7 +40,9 @@ RSpec.describe "Server end-to-end (tools/call)" do
     McpToolkit.configure do |c|
       c.server_name = "e2e-mcp"
       c.central_app_url = central_url
-      c.account_resolver = ->(synced_id) { synced_id == 42 ? :account_42 : nil }
+      # The resolver receives a STRING-normalized id (mirroring find_by(synced_id:),
+      # which AR-coerces per column), so compare as strings.
+      c.account_resolver = ->(synced_id) { synced_id.to_s == "42" ? :account_42 : nil }
       # The registry default scope applies to every resource that doesn't declare
       # its own (and to the discovery tools).
       c.registry.default_required_permissions_scope "widgets_app__read"
@@ -207,7 +209,9 @@ RSpec.describe "Server end-to-end (tools/call)" do
       McpToolkit.configure do |c|
         c.server_name = "open-mcp"
         c.central_app_url = central_url
-        c.account_resolver = ->(synced_id) { synced_id == 42 ? :account_42 : nil }
+        # The resolver receives a STRING-normalized id (mirroring find_by(synced_id:),
+        # which AR-coerces per column), so compare as strings.
+        c.account_resolver = ->(synced_id) { synced_id.to_s == "42" ? :account_42 : nil }
         c.registry.register(:widgets) do
           model model
           serializer serializer

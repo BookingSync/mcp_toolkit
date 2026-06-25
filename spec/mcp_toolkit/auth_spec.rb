@@ -17,8 +17,10 @@ RSpec.describe "Authentication" do
       c.central_app_url = central_url
       c.registry.default_required_permissions_scope "notifications__read"
       c.introspection_cache_ttl = 0 # don't let cache mask repeated stubs in tests
-      # Map the central account id to a local "scope root" object.
-      c.account_resolver = ->(synced_id) { synced_id == 42 ? :local_account_42 : nil }
+      # Map the central account id to a local "scope root" object. The resolver
+      # receives a STRING-normalized id (mirroring `find_by(synced_id:)`, which
+      # AR-coerces per column), so compare as strings here too.
+      c.account_resolver = ->(synced_id) { synced_id.to_s == "42" ? :local_account_42 : nil }
     end
   end
 
@@ -114,6 +116,16 @@ RSpec.describe "Authentication" do
 
       expect(result.authorized_for_scope?("")).to be(true)
       expect(result.authorized_for_scope?(nil)).to be(true)
+    end
+
+    it "string-normalizes authorized_account_ids so non-numeric ids don't collapse" do
+      # to_i would map every non-numeric id to 0; to_s preserves them distinctly.
+      result = McpToolkit::Auth::Introspection::Result.new(
+        valid: true, account_ids: [42, "acct_A", "550e8400-e29b-41d4-a716-446655440000"]
+      )
+
+      expect(result.authorized_account_ids)
+        .to eq(["42", "acct_A", "550e8400-e29b-41d4-a716-446655440000"])
     end
 
     describe "local expiry enforcement (defense-in-depth)" do
@@ -269,6 +281,51 @@ RSpec.describe "Authentication" do
 
       expect { described_class.call(token: "no_local") }
         .to raise_error(McpToolkit::Errors::Unauthorized, /no local scope/)
+    end
+
+    it "rejects a non-numeric selector that mismatches an accounts_user's bound account" do
+      # Regression: with to_i both "acct_A" and "acct_B" collapse to 0, so the
+      # mismatched selector slipped the guard. String comparison rejects it.
+      stub_introspect(
+        token: "au_str",
+        body: { valid: true, kind: "accounts_user", account_id: "acct_A", account_ids: ["acct_A"],
+                scopes: ["notifications__read"] }
+      )
+
+      expect { described_class.call(token: "au_str", arguments: { "account_id" => "acct_B" }) }
+        .to raise_error(McpToolkit::Errors::Unauthorized, /does not match this token's bound account/)
+    end
+
+    it "resolves a superuser selecting a string/UUID account to that exact id (not 0)" do
+      # Regression: the superuser branch returned candidate.to_i, so a string id
+      # resolved as 0. It now passes the exact string id to the resolver.
+      uuid = "550e8400-e29b-41d4-a716-446655440000"
+      McpToolkit.config.account_resolver = ->(synced_id) { synced_id == uuid ? :local_uuid_account : nil }
+      stub_introspect(
+        token: "su_str",
+        body: { valid: true, kind: "user", account_id: nil, account_ids: [uuid, "acct_X"],
+                scopes: ["notifications__read"] }
+      )
+
+      context = described_class.call(token: "su_str", arguments: { "account_id" => uuid })
+
+      expect(context.scope_root).to eq(:local_uuid_account)
+    end
+
+    it "resolves a numeric selector (Integer or String) consistently to the same scope root" do
+      # The numeric case must keep working: candidate may arrive as a JSON number
+      # (Integer) or a header/arg String; both normalize to the same scope root.
+      stub_introspect(
+        token: "su_num",
+        body: { valid: true, kind: "user", account_id: nil, account_ids: [42, 99],
+                scopes: ["notifications__read"] }
+      )
+
+      from_integer = described_class.call(token: "su_num", arguments: { "account_id" => 42 })
+      from_string  = described_class.call(token: "su_num", arguments: { "account_id" => "42" })
+
+      expect(from_integer.scope_root).to eq(:local_account_42)
+      expect(from_string.scope_root).to eq(:local_account_42)
     end
   end
 

@@ -88,8 +88,12 @@ class McpToolkit::Auth::Introspection
       scope_list.include?(required_scope.to_s)
     end
 
+    # Account ids are STRING-normalized for comparison: the contract allows
+    # integer OR string/UUID ids, so coercing to_i would collapse every
+    # non-numeric id to 0 and let unrelated accounts match. Strings compare
+    # safely and the resolver's `find_by(synced_id:)` coerces back per-column.
     def authorized_account_ids
-      Array(account_ids).map(&:to_i)
+      Array(account_ids).map(&:to_s)
     end
   end
 

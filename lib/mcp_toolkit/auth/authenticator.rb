@@ -64,12 +64,14 @@ class McpToolkit::Auth::Authenticator
 
     if introspection.accounts_user?
       bound = introspection.account_id
-      if candidate.present? && candidate.to_i != bound.to_i
+      # Compare as STRINGS: ids may be numeric or string/UUID, and to_i would
+      # collapse every non-numeric id to 0 (letting "acct_B" match "acct_A").
+      if candidate.present? && candidate.to_s != bound.to_s
         raise McpToolkit::Errors::Unauthorized,
               "account_id #{candidate} does not match this token's bound account"
       end
 
-      return bound
+      return bound.to_s
     end
 
     # superuser / multi-account: selection is mandatory and must be authorized.
@@ -79,11 +81,14 @@ class McpToolkit::Auth::Authenticator
             "via _meta[\"#{config.account_meta_key}\"] (or the account_id argument)"
     end
 
-    unless introspection.authorized_account_ids.include?(candidate.to_i)
+    # String-normalized membership (see accounts_user branch): `candidate` may be
+    # an Integer (forwarded `_meta` JSON number) or a String (header/arg); to_s
+    # normalizes both and authorized_account_ids is likewise string-normalized.
+    unless introspection.authorized_account_ids.include?(candidate.to_s)
       raise McpToolkit::Errors::Unauthorized, "account_id #{candidate} is not authorized for this token"
     end
 
-    candidate.to_i
+    candidate.to_s
   end
 
   def candidate_account_id

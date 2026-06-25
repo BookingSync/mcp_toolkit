@@ -54,6 +54,10 @@ RSpec.describe "Engine survives a route reload", if: rails_available do
   # again, and prints both as a single JSON line for the parent to assert on. Any
   # failure inside the boot surfaces as a non-zero exit + captured stderr.
   DRIVER = <<~'RUBY'
+    # Load THIS bundle in the child (BUNDLE_GEMFILE is inherited from the parent
+    # ENV) so rails + mcp_toolkit resolve to the same locked gems even though the
+    # child interpreter is invoked directly via Gem.ruby (not `bundle exec`).
+    require "bundler/setup"
     require "json"
     require "tmpdir"
     require "logger"
@@ -115,9 +119,13 @@ RSpec.describe "Engine survives a route reload", if: rails_available do
     require "open3"
 
     gem_root = File.expand_path("../..", __dir__)
-    # `bundle exec ruby -e` so the child sees the same locked gems (rails, etc.).
+    # Invoke the RUNNING interpreter directly via Gem.ruby (full path). A bare
+    # "bundle","exec","ruby" can resolve a SYSTEM ruby under a Bundler-managed
+    # parent; Gem.ruby is the portable way to re-enter the same interpreter. The
+    # child still loads the same locked gems because the driver does
+    # `require "bundler/setup"` and inherits BUNDLE_GEMFILE from this ENV.
     stdout, stderr, status = Open3.capture3(
-      "bundle", "exec", "ruby", "-e", DRIVER, chdir: gem_root
+      Gem.ruby, "-e", DRIVER, chdir: gem_root
     )
     raise "engine route-reload driver failed (#{status.exitstatus}):\n#{stderr}" unless status.success?
 
