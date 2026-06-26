@@ -1,6 +1,12 @@
 # frozen_string_literal: true
 
 require "mcp_toolkit"
+require "webmock/rspec"
+
+# Block all real HTTP; auth specs stub the central app's introspection endpoint.
+WebMock.disable_net_connect!
+
+Dir[File.join(__dir__, "support", "**", "*.rb")].each { |f| require f }
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure
@@ -11,5 +17,10 @@ RSpec.configure do |config|
 
   config.expect_with :rspec do |c|
     c.syntax = :expect
+  end
+
+  # Each example starts from a pristine, default configuration.
+  config.before do
+    McpToolkit.reset_config!
   end
 end

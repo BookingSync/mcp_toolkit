@@ -1,0 +1,98 @@
+plugins:
+  - rubocop-performance
+
+AllCops:
+  TargetRubyVersion: 3.2
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - "bin/**/*"
+    - "vendor/**/*"
+    - "tmp/**/*"
+    # Specs follow manual conventions (named subjects, in-example test doubles)
+    # that don't map cleanly to the library cops; they are not linted.
+    - "spec/**/*"
+
+# --- Layout -----------------------------------------------------------------
+
+Layout/LineLength:
+  Max: 120
+
+# --- Style ------------------------------------------------------------------
+
+# Prefer FLAT (compact) leaf declarations — `class McpToolkit::Auth::Authenticator`
+# — over the `module ... module ... class` pyramid. The only exception is the gem
+# entry point, which must open `module McpToolkit` as a block to host the Zeitwerk
+# loader setup, the top-level configuration methods, and the `MCPToolkit` alias;
+# compact is not expressible there. Files that genuinely defined several constants
+# under one namespace (the errors hierarchy) are split one-constant-per-file under
+# lib/mcp_toolkit/errors/ so each can be declared compactly.
+Style/ClassAndModuleChildren:
+  EnforcedStyle: compact
+  Exclude:
+    - "lib/mcp_toolkit.rb"
+
+# Define class methods as `def self.x`, never `class << self` (so the singleton
+# style stays consistent and greppable across the gem).
+Style/ClassMethodsDefinitions:
+  EnforcedStyle: def_self
+
+# The gem (gemspec, Gemfile, lib) is written with double-quoted strings; match
+# that convention instead of churning every literal.
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+# This is a library; per-class/module YARD comments are not enforced.
+Style/Documentation:
+  Enabled: false
+
+# --- Naming -----------------------------------------------------------------
+
+# `has_one` / `has_many` are association-DSL names mirroring AMS / ActiveRecord;
+# they are not boolean predicates.
+Naming/PredicatePrefix:
+  AllowedMethods:
+    - has_one
+    - has_many
+
+# --- Metrics ----------------------------------------------------------------
+# The extracted framework intentionally carries some larger units (the transport
+# controller, the server wiring, the registry/executor dispatch). Bump the
+# metrics cops to fit the code as written rather than contorting it; keep them
+# enabled so genuinely runaway methods still get flagged.
+
+Metrics/MethodLength:
+  Max: 30
+
+Metrics/AbcSize:
+  Max: 30
+
+Metrics/CyclomaticComplexity:
+  Max: 12
+
+Metrics/PerceivedComplexity:
+  Max: 12
+
+Metrics/ClassLength:
+  Max: 250
+
+Metrics/ModuleLength:
+  Max: 250
+
+Metrics/BlockLength:
+  Max: 50
+  Exclude:
+    - "*.gemspec"
+    - "Gemfile"
+
+Metrics/ParameterLists:
+  Max: 6
+
+# `id` is a domain-meaningful record identifier.
+Naming/MethodParameterName:
+  AllowedNames:
+    - id
+    - n
