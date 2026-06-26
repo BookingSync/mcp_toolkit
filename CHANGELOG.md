@@ -1,12 +1,10 @@
-## [0.2.0]
+## [0.1.0] - 2026-06-28
 
-Initial extraction from two independently-grown internal MCP servers.
-Standardizes on the official `mcp` gem (`~> 0.18`) as the wrapped JSON-RPC core.
-This remains the accumulation point until the first release is cut. Supersedes the
-unreleased 0.1.0: per-tool scope is now declared explicitly via
-`required_permissions_scope` (the implicit `required_application` + `scope_action`
-derivation is gone), and a mountable `McpToolkit::Engine` replaces the hand-rolled
-satellite routes + controller.
+Initial extraction from two independently-grown internal MCP servers into a single
+shared gem. Standardizes on the official `mcp` gem (`~> 0.18`) as the wrapped
+JSON-RPC core. Per-tool scope is declared explicitly via `required_permissions_scope`,
+and a mountable `McpToolkit::Engine` gives satellites their MCP routes without the
+hand-rolled controller wiring.
 
 ### Added
 
