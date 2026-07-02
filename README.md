@@ -208,6 +208,13 @@ serializer.serialize_collection(records, scope:, total_count:, limit:, offset:)
 Any class satisfying that contract slots in — including an app's existing
 serializers. Register it directly:
 
+> **Sparse fieldsets.** Both methods also accept an optional `fields:` keyword (an
+> array of attribute/relationship names) so `get` / `list` can return a subset of
+> a record's shape. Honoring it natively — the bundled base does — skips computing
+> the unselected members; a serializer that ignores it still works, because the
+> toolkit prunes its output to the requested `fields` instead. Omitting `fields:`
+> (the default) returns the full shape, so this is fully backward-compatible.
+
 ```ruby
 McpToolkit.registry.register(:bookings) do
   model       Booking

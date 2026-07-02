@@ -11,7 +11,8 @@ class McpToolkit::Tools::ResourceSchema < McpToolkit::Tools::Base
       - relationships: associated resources emitted in the record's `links`
       - standard_filters: ids, updated_since, limit, offset (accepted by the `list` tool)
       - filters: the per-attribute equality filter keys the `list` tool accepts
-    Call this before `list` to learn a resource's shape.
+    The `attributes` and `relationships` names are also the valid values for the `fields` sparse
+    fieldset argument on `get` / `list`. Call this before `list` to learn a resource's shape.
   DESC
 
   input_schema(

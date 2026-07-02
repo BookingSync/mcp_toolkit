@@ -86,6 +86,22 @@ RSpec.describe "Server end-to-end (tools/call)" do
     expect(payload["meta"]).to include("total_count" => 2)
   end
 
+  it "honors a sparse `fields` argument end-to-end, returning only the requested attributes" do
+    response = call_tool({ "resource" => "widgets", "fields" => "id" })
+
+    expect(response.dig("result", "isError")).to be_falsey
+    payload = JSON.parse(response.dig("result", "content", 0, "text"))
+    expect(payload["widgets"]).to eq([{ "id" => 1 }, { "id" => 2 }])
+    expect(payload["meta"]).to include("total_count" => 2)
+  end
+
+  it "returns a clean tool error for an unknown `fields` name" do
+    response = call_tool({ "resource" => "widgets", "fields" => "bogus" })
+
+    expect(response.dig("result", "isError")).to be(true)
+    expect(response.dig("result", "content", 0, "text")).to match(/unknown field\(s\): bogus/)
+  end
+
   it "allows a list call when the token carries the required <app>__read scope" do
     # the default before-stub already carries scopes: ["widgets_app__read"]
     expect(list_response.dig("result", "isError")).to be_falsey

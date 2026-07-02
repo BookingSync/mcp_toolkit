@@ -110,6 +110,27 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       expect(result[:widgets].map { |w| w[:id] }).to eq([1, 3])
     end
 
+    describe "sparse fieldsets (fields)" do
+      it "returns only the requested attributes when given a comma-separated string" do
+        result = described_class.call(resource:, scope_root: account, params: { fields: "id,name" })
+
+        expect(result[:widgets]).to eq([{ id: 1, name: "alpha" }, { id: 2, name: "beta" }, { id: 3, name: "gamma" }])
+        expect(result[:meta]).to eq(total_count: 3, limit: 25, offset: 0)
+      end
+
+      it "accepts an array of field names too" do
+        result = described_class.call(resource:, scope_root: account, params: { fields: %w[id] })
+
+        expect(result[:widgets]).to eq([{ id: 1 }, { id: 2 }, { id: 3 }])
+      end
+
+      it "rejects an unknown field with InvalidParams" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { fields: "id,bogus" })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /unknown field\(s\): bogus/)
+      end
+    end
+
     describe "operator-based (complex hash) filtering — API v3 parity" do
       it "applies a single { op:, value: } comparison condition" do
         result = described_class.call(
@@ -233,6 +254,63 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       expect do
         described_class.call(resource:, scope_root: account, id: nil)
       end.to raise_error(McpToolkit::Errors::InvalidParams, /id is required/)
+    end
+
+    it "honors a sparse `fields` selection, returning only the requested attributes" do
+      result = described_class.call(resource:, scope_root: account, id: 2, fields: "id,name")
+
+      expect(result).to eq(id: 2, name: "beta")
+    end
+
+    it "rejects an unknown `fields` name before the lookup runs" do
+      expect do
+        described_class.call(resource:, scope_root: account, id: 2, fields: "bogus")
+      end.to raise_error(McpToolkit::Errors::InvalidParams, /unknown field\(s\): bogus/)
+    end
+  end
+
+  # An injected serializer that predates the `fields:` kwarg (implements only the
+  # two-arg contract). Sparse fieldsets must still work by PRUNING its output, so
+  # the injection contract stays intact as the feature is added.
+  describe "sparse fieldsets on a serializer without a `fields:` keyword (output pruning)" do
+    let(:legacy_serializer) do
+      Class.new do
+        def self.serialize_one(record, scope: nil)
+          { id: record.id, name: record.name, "links" => { "owner" => record.id } }
+        end
+
+        def self.serialize_collection(records, scope: nil, total_count: nil, limit: nil, offset: nil)
+          rows = records.map { |r| serialize_one(r, scope:) }
+          { widgets: rows, meta: { total_count: total_count || rows.size, limit:, offset: } }
+        end
+      end
+    end
+
+    before do
+      serializer = legacy_serializer
+      rel = relation
+      McpToolkit.configure do |c|
+        c.registry.register(:legacy_widgets) do
+          model Object
+          serializer serializer
+          scope { |_root| rel }
+        end
+      end
+    end
+
+    subject(:legacy_resource) { McpToolkit.registry.fetch("legacy_widgets") }
+
+    it "prunes GetExecutor output to the requested attribute, dropping links" do
+      result = McpToolkit::GetExecutor.call(resource: legacy_resource, scope_root: account, id: 2, fields: "id")
+
+      expect(result).to eq(id: 2)
+    end
+
+    it "prunes ListExecutor rows while leaving the meta block untouched" do
+      result = McpToolkit::ListExecutor.call(resource: legacy_resource, scope_root: account, params: { fields: "id" })
+
+      expect(result[:widgets]).to eq([{ id: 1 }, { id: 2 }, { id: 3 }])
+      expect(result[:meta]).to include(limit: 25, offset: 0)
     end
   end
 

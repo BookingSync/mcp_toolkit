@@ -1,3 +1,25 @@
+## [0.2.0] - 2026-07-02
+
+### Added
+
+- **Sparse fieldsets** (JSON:API `fields[type]`) on the `get` and `list` tools. Pass
+  `fields` — an array of names or a comma-separated string — to return only the named
+  attributes and/or relationships, shrinking the response (a token win for MCP clients).
+  Attribute and relationship names share one flat namespace; `resource_schema` advertises
+  the valid values. Unknown names are rejected with `InvalidParams` (consistent with
+  unknown filter keys), so a typo is actionable rather than silently dropped.
+  - `McpToolkit::Serializer::Base` honors the selection NATIVELY: `serialize_one` /
+    `serialize_collection` / `serializable_hash` take an optional `fields:` keyword, and
+    unselected `has_many` relationships are never loaded (a query win, not just a payload
+    win). Under a selection the `links` block is omitted entirely when no relationship is
+    selected.
+  - `McpToolkit::FieldSelection` parses + validates the request; `McpToolkit::Serialization`
+    bridges the executors to the serializer.
+- **Backward compatible.** Omitting `fields` returns the full shape exactly as before. An
+  injected serializer that does NOT declare a `fields:` keyword still supports sparse
+  fieldsets — the toolkit prunes its output to the requested `fields` — so the serializer
+  injection contract is unchanged.
+
 ## [0.1.0] - 2026-06-28
 
 Initial extraction from two independently-grown internal MCP servers into a single
