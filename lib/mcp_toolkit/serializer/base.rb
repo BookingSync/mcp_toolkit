@@ -24,6 +24,18 @@
 # serializer that wants to power `resource_schema` should expose those too, but
 # they are not required for `get` / `list`.
 #
+# ## Sparse fieldsets (optional)
+#
+# Both entry points also accept an OPTIONAL `fields:` keyword — an array of the
+# attribute and/or relationship link-key names to include (JSON:API's sparse
+# fieldset; the two share one flat namespace). `fields: nil` (the default) means
+# "everything", so the contract above is unchanged for callers that omit it. When
+# a subset is given, only those members are emitted AND only the selected
+# relationships are loaded (unselected `has_many` links are never queried). A
+# serializer that does NOT declare a `fields:` keyword still supports sparse
+# fieldsets — McpToolkit::Serialization prunes its output instead — so honoring
+# `fields:` natively is a performance optimization, not a contract requirement.
+#
 # `scope` is whatever the serializer needs (typically the account); it may be
 # nil for models without translations.
 #
@@ -105,16 +117,19 @@ class McpToolkit::Serializer::Base
   # ---- entry points used by the executors (the injection contract) -----
 
   # Serialize a single record to its attributes+links hash. nil-safe.
-  def self.serialize_one(record, scope: nil)
+  # `fields:` (optional) restricts the output to a sparse fieldset — see the
+  # class-level docs.
+  def self.serialize_one(record, scope: nil, fields: nil)
     return nil if record.nil?
 
-    new(record, scope:).serializable_hash
+    new(record, scope:).serializable_hash(fields:)
   end
 
   # Serialize an array of records to the index wrapper, keyed by the
-  # pluralized resource name, with a `meta` pagination block.
-  def self.serialize_collection(records, scope: nil, total_count: nil, limit: nil, offset: nil)
-    rows = Array(records).map { |record| new(record, scope:).serializable_hash }
+  # pluralized resource name, with a `meta` pagination block. `fields:` (optional)
+  # restricts every row to a sparse fieldset — see the class-level docs.
+  def self.serialize_collection(records, scope: nil, total_count: nil, limit: nil, offset: nil, fields: nil)
+    rows = Array(records).map { |record| new(record, scope:).serializable_hash(fields:) }
     {
       root_key => rows,
       meta: { total_count: total_count.nil? ? rows.size : total_count, limit:, offset: }
@@ -159,13 +174,19 @@ class McpToolkit::Serializer::Base
     @scope = scope
   end
 
-  def serializable_hash
+  # `fields:` (optional) is a sparse fieldset — an array of attribute and/or
+  # relationship link-key names to include. nil (default) emits everything.
+  def serializable_hash(fields: nil)
+    selected = fields&.map(&:to_sym)
     hash = {}
     self.class.declared_attributes.each do |attr|
+      next if selected && !selected.include?(attr)
+
       hash[attr] = read_attribute(attr)
     end
     apply_high_precision_timestamps(hash)
-    hash["links"] = links
+    link_hash = links(selected)
+    hash["links"] = link_hash unless link_hash.nil?
     hash
   end
   alias as_json serializable_hash
@@ -190,8 +211,19 @@ class McpToolkit::Serializer::Base
   end
 
   # Builds the `links` hash: association links_key => ids, sorted.
-  def links
-    pairs = self.class.declared_associations.map do |association|
+  #
+  # `selected` is a sparse fieldset (array of symbols) or nil. With nil the block
+  # is always returned (possibly empty `{}`), preserving the default shape. Under
+  # a selection only the selected associations are included, AND the whole block
+  # is OMITTED (returns nil) when none were selected — so narrowing to a few
+  # attributes drops the `links` noise entirely.
+  def links(selected = nil)
+    associations = self.class.declared_associations
+    if selected
+      associations = associations.select { |association| selected.include?(association.links_key.to_sym) }
+      return nil if associations.empty?
+    end
+    pairs = associations.map do |association|
       [association.links_key, serialize_ids(association)]
     end
     pairs.sort_by(&:first).to_h

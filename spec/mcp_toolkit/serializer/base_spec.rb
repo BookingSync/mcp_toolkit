@@ -58,6 +58,36 @@ RSpec.describe McpToolkit::Serializer::Base do
     end
   end
 
+  describe ".serialize_one with a sparse `fields:` selection" do
+    let(:record) do
+      FakeRecord.new(
+        id: 7, total: 100, created_at: Time.utc(2026, 6, 18, 12, 0, 0),
+        synced_account_id: 42, owner_id: 5, owner_type: "User",
+        line_items: FakeRelation.new([FakeRecord.new(id: 3), FakeRecord.new(id: 1)])
+      )
+    end
+
+    it "emits only the selected attributes and omits the links block when no relationship is selected" do
+      hash = serializer.serialize_one(record, fields: %i[id total])
+
+      expect(hash).to eq(id: 7, total: 100)
+      expect(hash).not_to have_key("links")
+    end
+
+    it "narrows the links block to the selected relationships" do
+      hash = serializer.serialize_one(record, fields: %i[id account])
+
+      expect(hash).to eq(id: 7, "links" => { "account" => 42 })
+    end
+
+    it "returns the full shape when fields: is nil (default, unchanged behavior)" do
+      hash = serializer.serialize_one(record, fields: nil)
+
+      expect(hash.keys).to include(:id, :total, :created_at, "links")
+      expect(hash["links"].keys).to eq(%w[account line_items owner])
+    end
+  end
+
   describe ".serialize_collection" do
     it "wraps rows under the plural root with a meta block" do
       records = [FakeRecord.new(
@@ -70,6 +100,19 @@ RSpec.describe McpToolkit::Serializer::Base do
 
       expect(result.keys).to contain_exactly(:orders, :meta)
       expect(result[:orders].size).to eq(1)
+      expect(result[:meta]).to eq(total_count: 50, limit: 25, offset: 0)
+    end
+
+    it "applies a sparse `fields:` selection to every row, leaving the meta block intact" do
+      records = [FakeRecord.new(
+        id: 1, total: 10, created_at: nil,
+        synced_account_id: 1, owner_id: nil, owner_type: nil,
+        line_items: FakeRelation.new([])
+      )]
+
+      result = serializer.serialize_collection(records, total_count: 50, limit: 25, offset: 0, fields: %i[id])
+
+      expect(result[:orders]).to eq([{ id: 1 }])
       expect(result[:meta]).to eq(total_count: 50, limit: 25, offset: 0)
     end
   end

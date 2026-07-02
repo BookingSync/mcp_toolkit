@@ -21,6 +21,13 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
         available filter keys via `resource_schema` (the `filters` array). Unknown keys are
         rejected.
 
+    Sparse fieldset:
+      - fields: names of the attributes and/or relationships to include in each record, as an
+        array or a comma-separated string. Omit to return every field. Narrowing the set shrinks
+        the response (and skips loading unselected relationships) — prefer it when you only need a
+        few fields. Include "id" if you need it. Valid names come from a resource's
+        `resource_schema` (its `attributes` and `relationships`); unknown names are rejected.
+
     For tokens that span multiple accounts (superuser), pass `account_id` to pin the active
     account; account-scoped tokens may omit it. The response shape is
     { "<resource>": [...], "meta": { total_count, limit, offset } }.
@@ -48,7 +55,15 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
         additionalProperties: true
       },
       limit: { type: "integer", description: "Page size (default 25, max 100)" },
-      offset: { type: "integer", description: "Pagination offset (default 0)" }
+      offset: { type: "integer", description: "Pagination offset (default 0)" },
+      fields: {
+        type: %w[array string],
+        items: { type: "string" },
+        description: "Sparse fieldset — names of attributes and/or relationships to include in " \
+                     "each record, as an array or a comma-separated string. Omit to return every " \
+                     "field. Include \"id\" if you need it. Unknown names are rejected; see a " \
+                     "resource's `resource_schema` for valid attribute and relationship names."
+      }
     },
     required: ["resource"]
   )

@@ -5,6 +5,8 @@
 # `offset` filters plus the resource's declared per-attribute filters (equality
 # AND operator-based — see McpToolkit::Filtering), and serializes via the
 # resource's serializer, producing the `{ <root> => [...], meta: {...} }` wrapper.
+# An optional `fields` param applies a sparse fieldset to each row (see
+# McpToolkit::FieldSelection).
 class McpToolkit::ListExecutor
   DEFAULT_LIMIT = 25
   MAX_LIMIT = 100
@@ -23,11 +25,14 @@ class McpToolkit::ListExecutor
   end
 
   def call
+    # Validate the sparse fieldset BEFORE running the query so a bad `fields`
+    # fails fast rather than after a needless count + fetch.
+    selection = McpToolkit::FieldSelection.build(resource:, raw: params[:fields])
     relation = build_relation
     total_count = relation.count
     rows = paginate(relation).to_a
 
-    resource.serializer.serialize_collection(
+    McpToolkit::Serialization.new(resource.serializer, selection).collection(
       rows, scope: scope_root, total_count:, limit:, offset:
     )
   end
