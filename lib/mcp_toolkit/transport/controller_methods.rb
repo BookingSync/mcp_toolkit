@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "logger"
+
 # The MCP Streamable-HTTP transport, provided as an includable concern. An
 # app's controller includes this to get the full transport with no per-app code:
 #
@@ -102,6 +104,16 @@ module McpToolkit::Transport::ControllerMethods
     []
   end
 
+  # Logger for transport-level diagnostics. Defaults to Rails.logger when running
+  # inside Rails, and to a $stdout logger otherwise (e.g. the gem's own unit suite)
+  # so a diagnostic is never silently dropped. Overridable so a host can inject its
+  # own; never returns nil.
+  def mcp_logger
+    return Rails.logger if defined?(Rails)
+
+    @mcp_logger ||= Logger.new($stdout)
+  end
+
   # ---- per-request context --------------------------------------------
 
   # Per-request context threaded to the tools. The gem merges the request's
@@ -190,10 +202,25 @@ module McpToolkit::Transport::ControllerMethods
   end
 
   def mcp_render_session_not_found
+    mcp_log_session_not_found
     render json: {
       jsonrpc: "2.0",
       id: nil,
       error: { code: -32_001, message: "Session not found or expired" }
     }, status: :not_found
+  end
+
+  # Warns (greppable, no id/token) when a POST arrives with no matching session.
+  # The common cause is a session created on one process but looked up on another
+  # because `cache_store` isn't a shared store — invisible otherwise, since the
+  # caller just sees a 404. Records only whether a session-id header was PRESENT so
+  # a header-missing client bug is distinguishable from a cache misconfiguration.
+  def mcp_log_session_not_found
+    header_present = request.headers[SESSION_HEADER].present?
+    mcp_logger.warn(
+      "[McpToolkit] MCP session not found or expired " \
+      "(#{SESSION_HEADER} header present: #{header_present}). If sessions are created but not " \
+      "found, cache_store is likely not shared across processes (set it to a shared store, e.g. Rails.cache)."
+    )
   end
 end

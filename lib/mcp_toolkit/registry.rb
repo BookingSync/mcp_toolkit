@@ -43,7 +43,7 @@ class McpToolkit::Registry
   end
 
   def fetch(name)
-    find(name) or raise(UnknownResource, "unknown resource: #{name.inspect}")
+    find(name) or raise(UnknownResource, McpToolkit::UnknownResourceMessage.new(name, resource_names).build)
   end
 
   def find(name)
