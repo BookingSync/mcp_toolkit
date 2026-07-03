@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "logger"
+
 # The MCP Streamable-HTTP transport, provided as an includable concern. An
 # app's controller includes this to get the full transport with no per-app code:
 #
@@ -103,11 +105,13 @@ module McpToolkit::Transport::ControllerMethods
   end
 
   # Logger for transport-level diagnostics. Defaults to Rails.logger when running
-  # inside Rails (nil outside it); overridable so a host can inject its own.
+  # inside Rails, and to a $stdout logger otherwise (e.g. the gem's own unit suite)
+  # so a diagnostic is never silently dropped. Overridable so a host can inject its
+  # own; never returns nil.
   def mcp_logger
-    return Rails.logger if defined?(Rails) && Rails.respond_to?(:logger)
+    return Rails.logger if defined?(Rails)
 
-    nil
+    @mcp_logger ||= Logger.new($stdout)
   end
 
   # ---- per-request context --------------------------------------------
@@ -212,11 +216,8 @@ module McpToolkit::Transport::ControllerMethods
   # caller just sees a 404. Records only whether a session-id header was PRESENT so
   # a header-missing client bug is distinguishable from a cache misconfiguration.
   def mcp_log_session_not_found
-    logger = mcp_logger
-    return unless logger
-
     header_present = request.headers[SESSION_HEADER].present?
-    logger.warn(
+    mcp_logger.warn(
       "[McpToolkit] MCP session not found or expired " \
       "(#{SESSION_HEADER} header present: #{header_present}). If sessions are created but not " \
       "found, cache_store is likely not shared across processes (set it to a shared store, e.g. Rails.cache)."

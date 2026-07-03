@@ -20,11 +20,6 @@ class McpToolkit::ResourceSchema
   }.freeze
   COMPUTED_TYPE = "computed"
   STANDARD_FILTERS = %w[ids updated_since limit offset].freeze
-  # Attribute names, in priority order, treated as a target resource's
-  # human-readable label. The first one a target actually serializes is surfaced
-  # as a `target_name_attribute` hint on the relationship (best-effort; omitted if
-  # the target declares none of them).
-  NAME_ATTRIBUTE_CANDIDATES = %i[name title label subject display_name].freeze
 
   # `registry` is used to resolve each relationship to the registered resource it
   # points at (see #relationships). Defaults to the process-wide registry; the
@@ -101,16 +96,15 @@ class McpToolkit::ResourceSchema
   # names the `target_resource` — the registered resource this link resolves to,
   # callable via `list`/`get` — so e.g. a `scheduled_notifications.notification`
   # link is discoverably the `notifications` resource rather than a name to guess.
-  # `target_name_attribute` is a best-effort hint at that resource's human-readable
-  # field. Both are omitted (additive/backward-compatible) when unresolved.
+  # It is omitted (additive/backward-compatible) when the target can't be resolved
+  # (e.g. a polymorphic link).
   def relationship_schema(association)
     target = target_resource_for(association)
     {
       name: association.links_key,
       kind: association.type.to_s,
       polymorphic: association.polymorphic || false,
-      target_resource: target&.name,
-      target_name_attribute: name_attribute_for(target)
+      target_resource: target&.name
     }.compact
   end
 
@@ -157,13 +151,6 @@ class McpToolkit::ResourceSchema
     serializer.model_class
   rescue StandardError
     nil
-  end
-
-  def name_attribute_for(target)
-    return nil unless target
-
-    names = target.attribute_names
-    NAME_ATTRIBUTE_CANDIDATES.find { |candidate| names.include?(candidate) }&.to_s
   end
 
   # Reads an attribute's DB column type, tolerating models that don't expose

@@ -9,8 +9,7 @@ class McpToolkit::Tools::ResourceSchema < McpToolkit::Tools::Base
     the `resources` tool to discover names). Returns:
       - attributes: every field in the response, each with its `type` and a value `format` hint
       - relationships: associated resources emitted in the record's `links`; each names the
-        `target_resource` it resolves to (callable via `list`/`get`) plus, when known, a
-        `target_name_attribute` hint of that resource's human-readable field
+        `target_resource` it resolves to (callable via `list`/`get`)
       - standard_filters: ids, updated_since, limit, offset (accepted by the `list` tool)
       - filters: the per-attribute equality filter keys the `list` tool accepts
     The `attributes` and `relationships` names are also the valid values for the `fields` sparse

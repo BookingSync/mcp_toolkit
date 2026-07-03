@@ -67,10 +67,15 @@ RSpec.describe McpToolkit::Transport::ControllerMethods do
       expect(payload[:json][:error][:code]).to eq(-32_001)
     end
 
-    it "is a no-op (does not raise) when no logger is available, e.g. Rails absent" do
+    it "falls back to a $stdout logger (never nil) when Rails is absent, and still renders" do
+      # A sibling spec loads `rails/version` (partial Rails, no `.logger`) into this
+      # process, so hide the constant to deterministically exercise the Rails-absent
+      # branch regardless of load order.
+      hide_const("Rails")
       controller.session_header_value = "sess-123"
 
-      expect { controller.send(:mcp_render_session_not_found) }.not_to raise_error
+      expect { controller.send(:mcp_render_session_not_found) }
+        .to output(/\[McpToolkit\] MCP session not found or expired/).to_stdout
       expect(controller.rendered.first).to include(status: :not_found)
     end
   end

@@ -390,15 +390,14 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         described_class.call(McpToolkit.registry.fetch("scheduled_notifications"), registry: McpToolkit.registry)
       end
 
-      it "names the target resource a singular link resolves to, with a name-attribute hint" do
+      it "names the target resource a singular link resolves to" do
         relationship = schema[:relationships].find { |r| r[:name] == "notification" }
 
         expect(relationship).to include(
           name: "notification",
           kind: "has_one",
           polymorphic: false,
-          target_resource: "notifications",
-          target_name_attribute: "name"
+          target_resource: "notifications"
         )
       end
 
@@ -434,13 +433,11 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       )
     end
 
-    it "keeps its edit-distance fallback working without did_you_mean" do
-      registry = McpToolkit::Registry.new
-      registry.register(:notifications) { description "n" }
-      registry.register(:scheduled_notifications) { description "s" }
+    it "suggests a near-miss via UnknownResourceMessage's edit-distance fallback (no did_you_mean)" do
+      resource_names = %w[notifications scheduled_notifications]
+      message = McpToolkit::UnknownResourceMessage.new("notification", resource_names)
 
-      expect(registry.send(:fallback_suggestions, "notification", registry.resource_names))
-        .to include("notifications")
+      expect(message.send(:fallback_suggestions, "notification", resource_names)).to include("notifications")
     end
 
     describe "required scope resolution" do
