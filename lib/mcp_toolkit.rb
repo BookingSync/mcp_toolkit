@@ -38,6 +38,8 @@ require "active_support/cache"
 #   time/conversions         - Time#iso8601 (Serializer::Base timestamps;
 #                              Time.zone.parse in ListExecutor)
 #   date_time/conversions    - DateTime#iso8601 (token expires_at may be a DateTime)
+#   string/inflections       - String#pluralize (ResourceSchema resolves a link's
+#                              singular name to the plural registered resource name)
 require "active_support"
 require "active_support/core_ext/object/blank"
 require "active_support/core_ext/hash/keys"
@@ -45,6 +47,7 @@ require "active_support/core_ext/array/wrap"
 require "active_support/core_ext/enumerable"
 require "active_support/core_ext/time/conversions"
 require "active_support/core_ext/date_time/conversions"
+require "active_support/core_ext/string/inflections"
 
 # The version constant is needed eagerly by the gemspec (before the loader is set
 # up), so it stays an explicit require rather than an autoload.

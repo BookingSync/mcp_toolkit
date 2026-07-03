@@ -331,11 +331,116 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         ]
       )
     end
+
+    # The DX gap this closes: a `scheduled_notifications.notification` link is
+    # discoverably the `notifications` resource (callable via list/get) rather than
+    # a name the caller has to guess.
+    context "relationship target resource resolution" do
+      let(:notification_model) do
+        Class.new do
+          def self.columns_hash
+            { "id" => FakeRelation::Column.new(:integer), "name" => FakeRelation::Column.new(:string) }
+          end
+          def self.primary_key = "id"
+          def self.model_name = FakeModelName.new("notifications")
+        end
+      end
+
+      let(:notification_serializer) do
+        model = notification_model
+        Class.new(McpToolkit::Serializer::Base) do
+          attributes :id, :name
+          self.model_class = model
+          def self.name = "NotificationSerializer"
+        end
+      end
+
+      let(:scheduled_notification_serializer) do
+        Class.new(McpToolkit::Serializer::Base) do
+          attributes :id
+          has_one :notification            # singular link -> plural `notifications` resource
+          has_many :orphans                # no registered target
+          has_one :subject_record, polymorphic: true
+          self.model_class = Object
+          def self.name = "ScheduledNotificationSerializer"
+        end
+      end
+
+      before do
+        n_model = notification_model
+        n_serializer = notification_serializer
+        sn_serializer = scheduled_notification_serializer
+        McpToolkit.configure do |c|
+          c.registry.register(:notifications) do
+            model n_model
+            serializer n_serializer
+            description "Notifications."
+            scope { |_root| [] }
+          end
+          c.registry.register(:scheduled_notifications) do
+            model Object
+            serializer sn_serializer
+            description "Scheduled notifications."
+            scope { |_root| [] }
+          end
+        end
+      end
+
+      subject(:schema) do
+        described_class.call(McpToolkit.registry.fetch("scheduled_notifications"), registry: McpToolkit.registry)
+      end
+
+      it "names the target resource a singular link resolves to, with a name-attribute hint" do
+        relationship = schema[:relationships].find { |r| r[:name] == "notification" }
+
+        expect(relationship).to include(
+          name: "notification",
+          kind: "has_one",
+          polymorphic: false,
+          target_resource: "notifications",
+          target_name_attribute: "name"
+        )
+      end
+
+      it "omits target fields (additive/backward-compatible) when no resource matches" do
+        relationship = schema[:relationships].find { |r| r[:name] == "orphans" }
+
+        expect(relationship.keys).to contain_exactly(:name, :kind, :polymorphic)
+      end
+
+      it "leaves a polymorphic link unresolved (no single target resource)" do
+        relationship = schema[:relationships].find { |r| r[:name] == "subject_record" }
+
+        expect(relationship).to include(polymorphic: true)
+        expect(relationship).not_to have_key(:target_resource)
+      end
+    end
   end
 
   describe McpToolkit::Registry do
     it "raises UnknownResource for an unregistered name" do
       expect { McpToolkit.registry.fetch("nope") }.to raise_error(McpToolkit::Registry::UnknownResource)
+    end
+
+    it "suggests the closest registered name on a near-miss (did you mean)" do
+      expect { McpToolkit.registry.fetch("widget") }.to raise_error(
+        McpToolkit::Registry::UnknownResource, /Did you mean "widgets"\?/
+      )
+    end
+
+    it "lists the registered resources when the catalog is short" do
+      expect { McpToolkit.registry.fetch("zzz") }.to raise_error(
+        McpToolkit::Registry::UnknownResource, /Registered resources: "widgets"\./
+      )
+    end
+
+    it "keeps its edit-distance fallback working without did_you_mean" do
+      registry = McpToolkit::Registry.new
+      registry.register(:notifications) { description "n" }
+      registry.register(:scheduled_notifications) { description "s" }
+
+      expect(registry.send(:fallback_suggestions, "notification", registry.resource_names))
+        .to include("notifications")
     end
 
     describe "required scope resolution" do

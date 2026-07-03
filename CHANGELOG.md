@@ -1,3 +1,28 @@
+## [0.3.0] - 2026-07-03
+
+### Added
+
+- **Resource discovery DX** improvements, closing gaps hit when an MCP agent had to guess a
+  related resource's name rather than discover it:
+  - The `resource_schema` tool now names, for each relationship, the `target_resource` it
+    resolves to (callable via `list` / `get`) plus, when known, a `target_name_attribute` hint of
+    that resource's human-readable field. A `scheduled_notifications.notification` link is thus
+    discoverably the `notifications` resource instead of a name to guess. Additive and backward
+    compatible: both fields are omitted when the target can't be resolved (e.g. a polymorphic
+    link), so existing relationship consumers are unaffected.
+  - An unknown resource name now raises a "did you mean" message — the closest registered
+    name(s) via Ruby's stdlib `DidYouMean::SpellChecker` (with a dependency-free edit-distance
+    fallback), plus the full list when the catalog is short. It flows unchanged to the caller as
+    a clean `InvalidParams` tool error via the existing `resolve_descriptor` path.
+
+### Changed
+
+- The transport controller now logs a WARN when a POST arrives with no matching session
+  (`mcp_render_session_not_found`): a greppable, id/token-free line recording only whether a
+  session-id header was present, so a non-shared `cache_store` misconfiguration surfaces in a
+  satellite's own logs instead of only as a client-side 404. The logger defaults to
+  `Rails.logger` and is overridable via the new `mcp_logger` controller hook.
+
 ## [0.2.0] - 2026-07-02
 
 ### Added
