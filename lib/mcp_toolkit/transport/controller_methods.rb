@@ -5,7 +5,7 @@ require "logger"
 # The MCP Streamable-HTTP transport, provided as an includable concern. An
 # app's controller includes this to get the full transport with no per-app code:
 #
-#   class Mcp::ServerController < ApplicationController
+#   class McpController < ApplicationController
 #     include McpToolkit::Transport::ControllerMethods
 #   end
 #
@@ -44,7 +44,7 @@ require "logger"
 #
 # CSRF: the concern disables forgery protection (this is a token-authenticated
 # JSON API). Inherit from ActionController::Base (not ::API) if your app's
-# controller stack needs helper_method, as bsa-notifications does.
+# controller stack needs helper_method (as some host controller stacks require).
 module McpToolkit::Transport::ControllerMethods
   extend ActiveSupport::Concern
 

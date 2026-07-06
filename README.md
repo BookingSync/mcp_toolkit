@@ -61,8 +61,8 @@ introspects each forwarded bearer token against the central app.
 
 ```ruby
 McpToolkit.configure do |c|
-  c.server_name          = "bsa-notifications-mcp"
-  c.server_instructions  = "Read-only access to this account's notifications domain."
+  c.server_name          = "acme-mcp"
+  c.server_instructions  = "Read-only access to this account's widgets domain."
 
   # --- satellite auth ---
   c.auth_role            = :satellite
@@ -72,7 +72,7 @@ McpToolkit.configure do |c|
   # can override it per-resource (see below). Omit entirely for "no scope
   # required". Whether a scope is required is PER TOOL — there is no app-wide
   # permission flag.
-  c.registry.default_required_permissions_scope "notifications__read"
+  c.registry.default_required_permissions_scope "widgets__read"
 
   # Map the central account id to this app's LOCAL scope root (an Account here).
   c.account_resolver = ->(synced_account_id) { Account.find_by(synced_id: synced_account_id) }
@@ -94,22 +94,22 @@ the resolved scope root — this is the single tenancy chokepoint:
 Rails.application.config.to_prepare do
   McpToolkit.registry.reset!
 
-  McpToolkit.registry.register(:notifications) do
-    model       Notification
-    serializer  Mcp::NotificationSerializer        # your serializer (see below)
-    description "Email notification templates + their scheduling rules."
-    scope(&:notifications)                          # account.notifications
+  McpToolkit.registry.register(:widgets) do
+    model       Widget
+    serializer  WidgetSerializer                    # your serializer (see below)
+    description "Widget templates + their scheduling rules."
+    scope(&:widgets)                                # account.widgets
   end
 
-  McpToolkit.registry.register(:scheduled_notifications) do
-    model       ScheduledNotification
-    serializer  Mcp::ScheduledNotificationSerializer
-    description "Scheduled mailings."
+  McpToolkit.registry.register(:scheduled_widgets) do
+    model       ScheduledWidget
+    serializer  ScheduledWidgetSerializer
+    description "Scheduled widget deliveries."
     # Expose a public filter key that maps to a synced storage column:
     filterable  booking_id: :synced_booking_id
     # Override the registry default scope for just this resource (optional):
-    required_permissions_scope "notifications__read"
-    scope { |account| ScheduledNotification.where(synced_account_id: account.synced_id) }
+    required_permissions_scope "widgets__read"
+    scope { |account| ScheduledWidget.where(synced_account_id: account.synced_id) }
   end
 end
 ```
@@ -141,12 +141,12 @@ introspecting the forwarded token and scoped to the resolved account.
 The authority authenticates plaintext tokens locally and answers the
 introspection requests satellites send.
 
-**1. Configure** the local token lookup (your `McpToken.authenticate` equivalent):
+**1. Configure** the local token lookup (your `AccessToken.authenticate` equivalent):
 
 ```ruby
 McpToolkit.configure do |c|
   c.auth_role          = :authority
-  c.token_authenticator = ->(plaintext) { McpToken.authenticate(plaintext) }
+  c.token_authenticator = ->(plaintext) { AccessToken.authenticate(plaintext) }
   c.cache_store        = Rails.cache
 end
 ```
@@ -155,12 +155,12 @@ The token object your authenticator returns must respond to:
 `kind` (`:accounts_user` | `:user`), `account_id`, `account_ids`, `expires_at`
 (an `#iso8601`-able time or nil), and `scopes` (an array of `<app>__<action>`
 scopes; `[]` = no scopes). Optionally `touch_last_used!`. A typical app token
-model (e.g. `McpToken`) fits.
+model (e.g. `AccessToken`) fits.
 
 **2. Expose the introspection endpoint** the satellites call:
 
 ```ruby
-class Mcp::TokensController < ActionController::API
+class TokensController < ActionController::API
   def introspect
     token = McpToolkit::Auth::Authority.authenticate(extract_token)
     return render(json: McpToolkit::Auth::Authority.invalid_payload, status: :unauthorized) unless token
@@ -181,7 +181,7 @@ end
 
 ```ruby
 # config/routes.rb
-post "mcp/tokens/introspect", to: "mcp/tokens#introspect"
+post "mcp/tokens/introspect", to: "tokens#introspect"
 ```
 
 The payload `introspection_payload` emits is exactly the contract the satellite's
@@ -226,13 +226,13 @@ end
 ### Using the bundled base
 
 ```ruby
-class Mcp::NotificationSerializer < McpToolkit::Serializer::Base
+class WidgetSerializer < McpToolkit::Serializer::Base
   attributes :id, :name, :active, :created_at, :updated_at
   translates :subject, :template_html         # Globalize-backed { locale => value }
 
   has_one  :account, foreign_key: :synced_account_id
-  has_one  :mail_layout
-  has_many :scheduled_notifications
+  has_one  :layout
+  has_many :scheduled_widgets
 end
 ```
 

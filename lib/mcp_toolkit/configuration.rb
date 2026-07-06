@@ -99,10 +99,10 @@ class McpToolkit::Configuration
 
   # Looks up + verifies a plaintext bearer token locally, returning a token
   # object (duck-typed, see below) or nil. This is the authority's
-  # `McpToken.authenticate(plaintext)` equivalent. Required for the :authority
+  # `AccessToken.authenticate(plaintext)` equivalent. Required for the :authority
   # role; unused by a pure satellite.
   #
-  #   c.token_authenticator = ->(plaintext) { McpToken.authenticate(plaintext) }
+  #   c.token_authenticator = ->(plaintext) { AccessToken.authenticate(plaintext) }
   #
   # The returned token object must respond to the methods
   # `McpToolkit::Auth::Authority#introspection_payload` reads (see that module for
