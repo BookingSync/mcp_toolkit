@@ -237,6 +237,20 @@ class McpToolkit::Configuration
   # @return [#tool_definitions, #find, nil]
   attr_accessor :tool_provider
 
+  # --- generic tool naming ---------------------------------------------------
+
+  # A prefix prepended to the four GENERIC, Registry-backed authority tool names
+  # (`resources`, `resource_schema`, `get`, `list`) served by
+  # McpToolkit::Authority::RegistryToolProvider. Lets a host NAMESPACE its generic
+  # tools — e.g. set `"foo_"` and they advertise (and resolve) as `foo_resources`,
+  # `foo_resource_schema`, `foo_get`, `foo_list` — so distinct MCP surfaces don't
+  # collide and existing clients keep a stable, host-chosen name. Empty by default,
+  # so the tools keep their bare base names. The prefix value is the host's; the gem
+  # names no app concept.
+  #
+  # @return [String]
+  attr_accessor :generic_tool_name_prefix
+
   # --- diagnostics -----------------------------------------------------------
 
   # Optional logger for gateway/session diagnostics. All call sites guard with
@@ -278,6 +292,7 @@ class McpToolkit::Configuration
     @account_id_header = "X-MCP-Account-ID"
 
     initialize_authority_hook_defaults
+    @generic_tool_name_prefix = ""
 
     @upstream_timeout = 10
     @upstream_list_ttl = 900 # 15 minutes

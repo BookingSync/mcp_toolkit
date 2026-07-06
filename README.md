@@ -263,6 +263,7 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `protocol_version` | `nil` (negotiate) | pin an MCP protocol version (satellite/upstream client) |
 | `supported_protocol_versions` | `Protocol::SUPPORTED_VERSIONS` | version set the authority dispatcher negotiates |
 | `tool_provider` | `nil` | authority: the host's api-agnostic tool catalog (see below) |
+| `generic_tool_name_prefix` | `""` | authority: prefix namespacing the four generic Registry-backed tools (e.g. `"foo_"` → `foo_resources` …) |
 | `rate_limiter` / `usage_recorder` / `usage_flusher` | `nil` | authority transport billing hooks (config callables) |
 | `parent_controller` | `"ActionController::Base"` | superclass of the engine's controllers, read lazily (set to `"ActionController::API"` for the authority, or `"ApplicationController"` for `helper_method` compat) |
 | `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
@@ -472,6 +473,19 @@ Each generic tool resolves the `resource` argument against the registry, refuses
 enforces the resource's `required_permissions_scope`, and requires a resolved
 account for `get` / `list`. `resource_schema` advertises each attribute's filter
 `operators` and the resource `note`.
+
+By default the four tools advertise their bare names (`resources`,
+`resource_schema`, `get`, `list`). To **namespace** them — e.g. to keep a stable,
+host-specific name for existing clients, or to run several MCP surfaces without
+name collisions — set a prefix:
+
+```ruby
+c.generic_tool_name_prefix = "foo_"   # advertised + resolved as foo_resources,
+                                      # foo_resource_schema, foo_get, foo_list
+```
+
+The prefix applies only to these four generic tools; a composed bespoke provider's
+own tool names are unaffected.
 
 To serve the generic tools **and** your own bespoke tools behind one provider,
 compose them:

@@ -255,6 +255,39 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
     end
   end
 
+  describe "config.generic_tool_name_prefix" do
+    context "when unset (the default empty prefix)" do
+      it "advertises the four tools under their bare base names" do
+        names = provider.tool_definitions(context).map { |definition| definition[:name] }
+
+        expect(names).to contain_exactly("resources", "resource_schema", "get", "list")
+      end
+
+      it "resolves the bare base names" do
+        expect(provider.find("list")).to be_a(McpToolkit::Authority::Tools::List)
+      end
+    end
+
+    context "when set to a non-empty prefix" do
+      before { McpToolkit.config.generic_tool_name_prefix = "foo_" }
+
+      it "advertises the four tools under their prefixed names" do
+        names = provider.tool_definitions(context).map { |definition| definition[:name] }
+
+        expect(names).to contain_exactly("foo_resources", "foo_resource_schema", "foo_get", "foo_list")
+      end
+
+      it "resolves a prefixed name to its tool instance" do
+        expect(provider.find("foo_list")).to be_a(McpToolkit::Authority::Tools::List)
+        expect(provider.find("foo_resource_schema")).to be_a(McpToolkit::Authority::Tools::ResourceSchema)
+      end
+
+      it "no longer resolves the bare base name (only the prefixed name is a tool)" do
+        expect(provider.find("list")).to be_nil
+      end
+    end
+  end
+
   describe "per-resource scope gating" do
     before do
       s = widget_serializer

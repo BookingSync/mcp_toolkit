@@ -70,6 +70,11 @@
     several providers (e.g. the RegistryToolProvider + a host's bespoke tools)
     behind one `config.tool_provider`: `tool_definitions` concatenates in order,
     `find` returns the first match.
+  - `config.generic_tool_name_prefix` (default `""`) — namespaces the four generic
+    Registry-backed tools. When set (e.g. `"foo_"`) the provider advertises and
+    resolves them as `foo_resources` / `foo_resource_schema` / `foo_get` /
+    `foo_list`, letting a host keep stable, namespaced tool names for existing
+    clients; the empty default keeps the bare base names.
 - **`McpToolkit::Resource` generic seams** (all api-agnostic) — `superusers_only!`
   / `superusers_only?` (authority tools honor it), `note(text)` + reader (surfaced
   by `resource_schema`), and `filter(name, type:, description:, &applier)` +
