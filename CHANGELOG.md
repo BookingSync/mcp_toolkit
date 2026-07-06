@@ -48,6 +48,39 @@
   (context lets the host hide superuser-only tools) and `provider.find(name) -> a
   tool object` (responding to `#required_permissions_scope` + `#call(context:,
   **arguments)`). The dispatcher enforces the per-tool scope gate CENTRALLY.
+- **Registry-backed authority tools** — the authority-path counterpart to the
+  satellite's SDK tools, so a first-party server can serve the SAME four generic
+  read tools (`resources` / `resource_schema` / `get` / `list`) over
+  `config.registry` through the hand-rolled dispatcher, reusing the existing
+  `ListExecutor` / `GetExecutor` / `ResourceSchema` / `Serialization` /
+  `FieldSelection` / `Filtering` UNCHANGED.
+  - `McpToolkit::Authority::RegistryToolProvider.new(config:)` — a `tool_provider`
+    serving the four generic tools; `find(name)` returns a tool instance, and each
+    tool declares NO static scope (the per-resource scope is enforced dynamically
+    at call time). The satellite SDK tool path (`McpToolkit::Tools::*`,
+    `McpToolkit::Server`) is untouched — this is added alongside it.
+  - `McpToolkit::Authority::Tools::{Resources,ResourceSchema,Get,List}` — the four
+    thin tools. Each resolves the `resource` argument against the registry
+    (InvalidParams for unknown), gates a `superusers_only?` resource against
+    `context.superuser?` (REFUSE in get/list/resource_schema, HIDE in resources),
+    gates the resource's `required_scope_for` against the principal, and (get/list)
+    requires a resolved `context.account`. Returns a raw Hash for the dispatcher to
+    wrap — distinct by design from the satellite tools' `MCP::Tool::Response`.
+  - `McpToolkit::Authority::CompositeToolProvider.new(*providers)` — composes
+    several providers (e.g. the RegistryToolProvider + a host's bespoke tools)
+    behind one `config.tool_provider`: `tool_definitions` concatenates in order,
+    `find` returns the first match.
+- **`McpToolkit::Resource` generic seams** (all api-agnostic) — `superusers_only!`
+  / `superusers_only?` (authority tools honor it), `note(text)` + reader (surfaced
+  by `resource_schema`), and `filter(name, type:, description:, &applier)` +
+  `custom_filters` — a resource-specific filter whose block narrows the scoped
+  relation from a TOP-LEVEL request param, so a host can express a relational
+  filter the generic equality/operator allowlist can't. `ListExecutor` applies the
+  matching custom filters BEFORE the allowlist filters (its only change).
+- **`McpToolkit::ResourceSchema` enrichment** — each attribute now advertises the
+  filter `operators` it accepts (derived from `Filtering::OPERATORS_BY_TYPE`), and
+  the resource `note` is passed through, so a client can discover exactly which
+  `{ op:, value: }` conditions `list` will accept.
 - **Server-vs-gateway identity split** — `config.gateway_client_name` /
   `gateway_client_version` (each defaulting to `server_name` / `server_version`).
   `Gateway::Client`'s handshake `clientInfo` now reads the GATEWAY identity, so an

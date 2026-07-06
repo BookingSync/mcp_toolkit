@@ -277,7 +277,8 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 - `McpToolkit.configure { |c| ... }`, `McpToolkit.config`, `McpToolkit.registry`,
   `McpToolkit.reset_config!`
 - `McpToolkit::Registry#register(name) { ... }` (DSL: `model`, `serializer`,
-  `scope`, `description`, `filterable`, `required_permissions_scope`) +
+  `scope`, `description`, `note`, `filterable`, `filter(name, type:, description:,
+  &applier)`, `superusers_only!`, `required_permissions_scope`) +
   `#default_required_permissions_scope`
 - `McpToolkit::Serializer::Base` (DSL: `attributes`, `has_one`, `has_many`,
   `translates`)
@@ -295,8 +296,13 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
   billing/tenancy steps overridable hooks),
   `McpToolkit::Authority::ServerController` (subclassable base),
   `McpToolkit::Authority::Context` (`account` / `principal` / `bearer_token` /
-  `superuser?`), `McpToolkit::Tools::AuthorityBase` (optional tool base), and
-  `config.tool_provider` (the api-agnostic tool seam)
+  `superuser?`), `McpToolkit::Tools::AuthorityBase` (optional tool base),
+  `config.tool_provider` (the api-agnostic tool seam),
+  `McpToolkit::Authority::RegistryToolProvider.new(config:)` (serves the four
+  generic Registry-backed tools `resources` / `resource_schema` / `get` / `list`,
+  reusing the executors + schema builder) +
+  `McpToolkit::Authority::CompositeToolProvider.new(*providers)` (compose it with
+  bespoke tools)
 - `McpToolkit::Session` (opaque `#data` payload, e.g. to bind a session to a token id)
 - `McpToolkit::Auth::Introspection` / `Authenticator` (satellite),
   `McpToolkit::Auth::Authority` (authority)
@@ -431,6 +437,51 @@ end
 `bearer_token`, `superuser?`). It is re-created for EVERY JSON-RPC call — including
 each element of a batch — so a mixed-account batch resolves the right account per
 call.
+
+#### Or serve the generic Registry-backed tools
+
+If your tools are just account-scoped, read-only views over models, you don't need
+to hand-write them. Register each as a resource (exactly as on the satellite side)
+and let the bundled provider serve the same four generic tools — `resources`,
+`resource_schema`, `get`, `list` — over the authority dispatcher:
+
+```ruby
+McpToolkit.configure do |c|
+  c.registry.register(:widgets) do
+    model Widget
+    serializer WidgetSerializer                 # any class satisfying the serializer contract
+    description "Widgets for the active account."
+    filterable status: :status, owner_id: :owner_id
+    # A resource-specific ("custom") filter: an arbitrary block, keyed by a
+    # top-level request param, that the generic equality allowlist can't express.
+    filter :for_project, type: :integer, description: "Only widgets in this project" do |relation, id|
+      relation.joins(:board).where(boards: { project_id: id })
+    end
+    superusers_only!                            # optional: refuse/hide for non-superuser tokens
+    note "Read-only projection; do not interpret status codes without domain context."
+    scope { |account| Widget.where(account_id: account.id) }
+  end
+
+  # The generic tools, served over config.registry:
+  c.tool_provider = McpToolkit::Authority::RegistryToolProvider.new(config: c)
+end
+```
+
+Each generic tool resolves the `resource` argument against the registry, refuses a
+`superusers_only!` resource for a non-superuser (and hides it from `resources`),
+enforces the resource's `required_permissions_scope`, and requires a resolved
+account for `get` / `list`. `resource_schema` advertises each attribute's filter
+`operators` and the resource `note`.
+
+To serve the generic tools **and** your own bespoke tools behind one provider,
+compose them:
+
+```ruby
+c.tool_provider = McpToolkit::Authority::CompositeToolProvider.new(
+  McpToolkit::Authority::RegistryToolProvider.new(config: c),
+  MyBespokeToolProvider.new                    # e.g. an audit/versions tool
+)
+```
 
 ### 2. Serve it through the authority transport
 

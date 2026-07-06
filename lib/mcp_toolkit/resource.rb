@@ -16,6 +16,16 @@
 class McpToolkit::Resource
   class NotConfigured < StandardError; end
 
+  # A resource-specific ("custom") filter: a request-facing key whose value is
+  # applied to the relation by an arbitrary host-supplied block, rather than the
+  # generic equality/operator allowlist. The block is api-agnostic — it receives
+  # the already-scoped relation and the raw request value and returns a narrowed
+  # relation — so a host can express a relational or otherwise non-column filter
+  # (e.g. "only rows whose associated booking is in this rental") without the gem
+  # knowing anything about the query. `type`/`description` are surfaced by
+  # resource_schema so a client can discover the filter.
+  CustomFilter = Struct.new(:name, :type, :description, :applier, keyword_init: true)
+
   attr_reader :name
 
   def initialize(name)
@@ -24,7 +34,10 @@ class McpToolkit::Resource
     @serializer = nil
     @scope_block = nil
     @description = nil
+    @note = nil
+    @superusers_only = false
     @filterable = {}
+    @custom_filters = {}
     @required_permissions_scope = nil
   end
 
@@ -47,6 +60,59 @@ class McpToolkit::Resource
     @description = text if text
     @description
   end
+
+  # Free-form usage caveat surfaced by the `resources` / `resource_schema` tools,
+  # e.g. to flag a resource as internal-debugging-only and not to be interpreted
+  # without domain knowledge. Read with no arg. api-agnostic passthrough string.
+  def note(text = nil)
+    @note = text if text
+    @note
+  end
+
+  # Restricts this resource to superuser (cross-tenant) callers on the AUTHORITY
+  # path: an authority tool refuses `get` / `list` / `resource_schema` for a
+  # non-superuser and HIDES the resource from `resources` discovery. Declared in a
+  # resource's registration block:
+  #
+  #   McpToolkit.registry.register(:audit_events) do
+  #     superusers_only!
+  #     ...
+  #   end
+  #
+  # Generic and api-agnostic — the gem never names an app concept; the caller's
+  # superuser-ness is derived by the Authority::Context off the principal.
+  def superusers_only!
+    @superusers_only = true
+  end
+
+  # Whether this resource is restricted to superuser callers (default false).
+  def superusers_only?
+    @superusers_only
+  end
+
+  # Declares a resource-specific ("custom") filter: a request-facing `name` whose
+  # value is applied to the already-scoped relation by the given block. Unlike the
+  # `filterable` allowlist (generic equality/operator filters on a declared
+  # column), a custom filter runs ARBITRARY host logic, so a host can express a
+  # relational filter the gem could not derive:
+  #
+  #   filter :rental_id, type: :integer, description: "Only rows for this rental" do |relation, value|
+  #     relation.joins(:booking).where(bookings: { rental_id: value })
+  #   end
+  #
+  # The block receives `(relation, value)` and MUST return a relation (narrowing
+  # only). `type` / `description` are metadata surfaced by `resource_schema`. The
+  # value arrives from a TOP-LEVEL request param keyed by `name` (see ListExecutor),
+  # applied BEFORE the allowlist `filterable` filters. api-agnostic: the gem stores
+  # and calls the block without inspecting it.
+  def filter(name, type:, description:, &applier)
+    @custom_filters[name.to_sym] = CustomFilter.new(name: name.to_sym, type:, description:, applier:)
+  end
+
+  # Request-facing custom-filter key (symbol) => CustomFilter. Consumed by the list
+  # executor (which applies each block whose key is present in the request params)
+  # and by resource_schema (which surfaces each filter's type/description).
+  attr_reader :custom_filters
 
   # The OAuth-style scope a token MUST carry to reach this resource via the
   # generic tools (e.g. "notifications__read"). Declared explicitly per resource:

@@ -45,8 +45,25 @@ class McpToolkit::ListExecutor
     relation = resource.resolve_relation(scope_root)
     relation = apply_ids(relation)
     relation = apply_updated_since(relation)
+    relation = apply_custom_filters(relation)
     relation = apply_attribute_filters(relation)
     apply_order(relation)
+  end
+
+  # Applies the resource's declared custom (resource-specific) filters — each an
+  # arbitrary host-supplied block — for the keys actually present as TOP-LEVEL
+  # request params, BEFORE the generic allowlist `filter` attributes. Each block
+  # receives the already-scoped relation and the raw value and returns a narrowed
+  # relation, so a host can express a relational filter the generic path can't
+  # derive (see Resource#filter). A resource with no custom filters is a no-op.
+  def apply_custom_filters(relation)
+    resource.custom_filters.each_value do |custom_filter|
+      value = params[custom_filter.name]
+      next if value.nil? || value == ""
+
+      relation = custom_filter.applier.call(relation, value)
+    end
+    relation
   end
 
   # Order by `id` when the primary key is numeric; otherwise by `created_at`
