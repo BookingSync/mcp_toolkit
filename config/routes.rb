@@ -6,13 +6,15 @@
 #
 #   mount McpToolkit::Engine => "/mcp"
 #
-#   POST   /mcp          -> create   (JSON-RPC requests/responses)
-#   GET    /mcp          -> stream   (405; no server-initiated SSE)
-#   DELETE /mcp          -> destroy  (terminate the session)
-#   GET    /mcp/health   -> health   (unauthenticated probe)
+#   POST   /mcp                     -> create     (JSON-RPC requests/responses)
+#   GET    /mcp                     -> stream     (405; no server-initiated SSE)
+#   DELETE /mcp                     -> destroy    (terminate the session)
+#   GET    /mcp/health              -> health     (unauthenticated probe)
+#   POST   /mcp/tokens/introspect   -> introspect (authority token introspection)
 McpToolkit::Engine.routes.draw do
   post "/", to: "server#create"
   get "/", to: "server#stream"
   delete "/", to: "server#destroy"
   get "health", to: "server#health"
+  post "tokens/introspect", to: "tokens#introspect"
 end

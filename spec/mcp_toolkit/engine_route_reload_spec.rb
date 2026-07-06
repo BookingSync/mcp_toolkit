@@ -4,7 +4,7 @@ require "spec_helper"
 
 # Regression spec for the route-reloader wipe.
 #
-# The engine draws its four MCP routes in the engine's `config/routes.rb` rather
+# The engine draws its MCP routes in the engine's `config/routes.rb` rather
 # than in a class-body `McpToolkit::Engine.routes.draw` block. The reason is
 # Rails' routes_reloader: a host application builds its route set lazily and runs
 # the reloader on boot (and again on every reload). The reloader re-evaluates each
@@ -14,7 +14,7 @@ require "spec_helper"
 # 404'ing. Moving the draw into config/routes.rb is what makes the routes
 # materialize and survive subsequent reloads.
 #
-# The sibling engine_spec.rb stubs Rails and asserts the four routes are *drawn*,
+# The sibling engine_spec.rb stubs Rails and asserts the routes are *drawn*,
 # but a stub cannot reproduce the reloader: only a REAL Rails::Application driving
 # its routes_reloader does, which is why the original bug slipped through.
 #
@@ -38,15 +38,17 @@ rails_available =
   end
 
 RSpec.describe "Engine survives a route reload", if: rails_available do
-  # The four endpoints as [verb, engine-relative path, controller#action]. Paths
-  # are relative to the engine's own route set (the `/mcp` mount supplies the
-  # prefix), so the roots are "/" and the probe is "/health". `mcp_toolkit/server`
-  # is the isolated-namespace path of the gem-provided McpToolkit::ServerController.
+  # The endpoints as [verb, engine-relative path, controller#action]. Paths are
+  # relative to the engine's own route set (the `/mcp` mount supplies the prefix),
+  # so the roots are "/" and the probe is "/health". `mcp_toolkit/server` /
+  # `mcp_toolkit/tokens` are the isolated-namespace paths of the gem-provided
+  # McpToolkit::ServerController / McpToolkit::TokensController.
   EXPECTED_ENGINE_ROUTES = [
-    ["POST",   "/",       "mcp_toolkit/server#create"],
-    ["GET",    "/",       "mcp_toolkit/server#stream"],
-    ["DELETE", "/",       "mcp_toolkit/server#destroy"],
-    ["GET",    "/health", "mcp_toolkit/server#health"]
+    ["POST",   "/",                  "mcp_toolkit/server#create"],
+    ["GET",    "/",                  "mcp_toolkit/server#stream"],
+    ["DELETE", "/",                  "mcp_toolkit/server#destroy"],
+    ["GET",    "/health",            "mcp_toolkit/server#health"],
+    ["POST",   "/tokens/introspect", "mcp_toolkit/tokens#introspect"]
   ].freeze
 
   # The driver script: boots a real, minimal Rails app in a child process, mounts
@@ -136,7 +138,7 @@ RSpec.describe "Engine survives a route reload", if: rails_available do
     expect(@result.fetch("mount_path")).to eq("/mcp")
   end
 
-  it "draws the four MCP endpoints in the engine route set once booted" do
+  it "draws the MCP endpoints in the engine route set once booted" do
     # JSON parses each route back to a [verb, path, action] array, matching the
     # shape of EXPECTED_ENGINE_ROUTES.
     expect(@result.fetch("before_reload")).to contain_exactly(*EXPECTED_ENGINE_ROUTES)

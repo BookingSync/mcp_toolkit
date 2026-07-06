@@ -151,6 +151,33 @@ class McpToolkit::Configuration
   # @return [McpToolkit::Registry]
   attr_accessor :registry
 
+  # --- gateway / upstreams ---------------------------------------------------
+
+  # @return [Integer] HTTP open/read timeout (s) for a gateway's calls to an
+  #   upstream MCP server (McpToolkit::Gateway::Client).
+  attr_accessor :upstream_timeout
+  # @return [Integer] TTL (s) for an upstream's cached, namespaced tool list in
+  #   McpToolkit::Gateway::Aggregator.
+  attr_accessor :upstream_list_ttl
+
+  # The registry of upstream MCP servers this gateway aggregates + proxies to.
+  # Each config carries its own (like `registry`), so it resets with a fresh
+  # config. Register via the `register_upstream` sugar below or directly on this
+  # instance. Empty unless the app registers upstreams, so a non-gateway app is
+  # unaffected.
+  #
+  # @return [McpToolkit::Gateway::UpstreamRegistry]
+  attr_reader :upstreams
+
+  # --- diagnostics -----------------------------------------------------------
+
+  # Optional logger for gateway/session diagnostics. All call sites guard with
+  # `logger&.warn` / `logger&.error`, so nil (the default) silences them. A Rails
+  # host typically sets this to `Rails.logger`.
+  #
+  # @return [#warn, #error, nil]
+  attr_accessor :logger
+
   # Vendor-neutral defaults; apps override the auth wiring + identity as needed.
   def initialize
     @server_name = "mcp-server"
@@ -178,7 +205,20 @@ class McpToolkit::Configuration
     @account_meta_key = "mcp-toolkit/account-id"
     @account_id_header = "X-MCP-Account-ID"
 
+    @upstream_timeout = 10
+    @upstream_list_ttl = 900 # 15 minutes
+    @logger = nil
+
     @registry = McpToolkit::Registry.new
+    @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
+  end
+
+  # Config sugar: register a gateway upstream. Delegates to `upstreams.register`,
+  # so a blank url is ignored (an unconfigured upstream is simply absent).
+  #
+  #   c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
+  def register_upstream(key:, url:)
+    upstreams.register(key:, url:)
   end
 
   # The serializer base, lazily defaulting to the gem's bundled DSL base. Lazy so

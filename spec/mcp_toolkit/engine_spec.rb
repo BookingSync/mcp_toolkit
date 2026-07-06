@@ -50,7 +50,7 @@ RSpec.describe "Mountable engine + gem controller" do
 
   describe "McpToolkit::Engine routes" do
     # A recorder standing in for the engine's route set: captures each verb call
-    # as [verb, path, to] so we can assert the four endpoints are drawn. The routes
+    # as [verb, path, to] so we can assert the endpoints are drawn. The routes
     # live in the engine's config/routes.rb (drawn through the routes_reloader so
     # they survive route reloads), so we load THAT file against the recorder.
     let(:route_recorder) do
@@ -88,12 +88,13 @@ RSpec.describe "Mountable engine + gem controller" do
 
     after { McpToolkit.send(:remove_const, :Engine) if McpToolkit.const_defined?(:Engine, false) }
 
-    it "draws the four MCP endpoints mapping to the server controller actions" do
+    it "draws the MCP endpoints mapping to the server + tokens controller actions" do
       expect(route_recorder.drawn).to contain_exactly(
         [:post, "/", "server#create"],
         [:get, "/", "server#stream"],
         [:delete, "/", "server#destroy"],
-        [:get, "health", "server#health"]
+        [:get, "health", "server#health"],
+        [:post, "tokens/introspect", "tokens#introspect"]
       )
     end
 

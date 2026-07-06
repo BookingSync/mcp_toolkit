@@ -37,6 +37,14 @@ RSpec.describe McpToolkit do
       expect(config.serializer_base).to eq(McpToolkit::Serializer::Base)
     end
 
+    it "ships vendor-neutral gateway + diagnostics defaults" do
+      expect(config.upstream_timeout).to eq(10)
+      expect(config.upstream_list_ttl).to eq(900)
+      expect(config.logger).to be_nil
+      expect(config.upstreams).to be_a(McpToolkit::Gateway::UpstreamRegistry)
+      expect(config.upstreams.all).to be_empty
+    end
+
     it "defaults the account_resolver to identity" do
       expect(config.account_resolver.call(42)).to eq(42)
     end

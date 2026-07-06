@@ -263,6 +263,10 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `parent_controller` | `"ActionController::Base"` | superclass of the engine's `ServerController` (set to `"ApplicationController"` for `helper_method` compat) |
 | `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
 | `account_id_header` | `"X-MCP-Account-ID"` | header fallback for the account selector |
+| `upstreams` | empty registry | gateway: registered upstream MCP servers (register via `register_upstream`) |
+| `upstream_timeout` | `10` | gateway: HTTP timeout (s) for calls to an upstream |
+| `upstream_list_ttl` | `900` | gateway: TTL (s) for an upstream's cached tool list |
+| `logger` | `nil` | optional logger for gateway/session diagnostics (`Rails.logger`) |
 
 ## Public API surface
 
@@ -278,16 +282,90 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
   `McpToolkit::ServerController` (its controller; parent via `parent_controller`)
 - `McpToolkit::Transport::ControllerMethods` (standalone controller concern;
   override `mcp_config` / `mcp_extra_tools`)
-- `McpToolkit::Session`
+- `McpToolkit::Session` (opaque `#data` payload, e.g. to bind a session to a token id)
 - `McpToolkit::Auth::Introspection` / `Authenticator` (satellite),
   `McpToolkit::Auth::Authority` (authority)
 - `McpToolkit::Errors::{InvalidParams, Unauthorized, ConfigurationError}`
+- Gateway layer (a central app aggregating/proxying other MCP servers):
+  `McpToolkit::Gateway::UpstreamRegistry` (via `config.upstreams` /
+  `config.register_upstream`), `McpToolkit::Gateway::{Client, Aggregator, Proxy}`,
+  and its errors `McpToolkit::Gateway::{UnknownUpstream, UpstreamCallError}` +
+  `McpToolkit::Gateway::Client::Error`
+- `McpToolkit::TokensController` — the authority introspection endpoint drawn by
+  the engine at `POST /mcp/tokens/introspect`
 
-## Scope (what's intentionally NOT here)
+## Gateway / authority endpoint
 
-The gateway / upstream-aggregation layer (a central app's `Mcp::Upstreams*`) is
-**out of scope** — it's core-only and ships to no satellite. This toolkit is for
-servers that expose tools, not for aggregating other servers.
+Beyond exposing a single server's own tools, the toolkit also ships the generic
+**gateway** layer a central app uses to aggregate *other* MCP servers and proxy
+calls to them, plus the **authority** introspection endpoint satellites call.
+Every app-specific value (the upstream URLs, the account-selector meta key, the
+logger, timeouts) is injected via config — nothing here names a deployment.
+
+### Register upstreams
+
+Each upstream has a `key` (the tool-name namespace prefix — its tools surface as
+`<key>__<tool>`) and a `url` (its MCP HTTP endpoint). A blank url is ignored, so
+an ENV lookup can be passed directly:
+
+```ruby
+McpToolkit.configure do |c|
+  c.cache_store = Rails.cache          # share the upstream tool-list cache across workers
+  c.logger      = Rails.logger         # optional; degrade/recovery diagnostics
+  c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
+  c.register_upstream(key: "billing",       url: ENV["BILLING_SERVER_URL"])
+end
+```
+
+### Aggregate upstream tool lists
+
+`Aggregator#tool_definitions` returns every upstream's tools, namespaced, pulled
+concurrently. Each upstream's list is cached (`config.upstream_list_ttl`, default
+15 min); only a **non-empty** pull is cached, and a failing upstream is omitted
+(and logged via `config.logger`) rather than breaking the whole list.
+
+```ruby
+definitions = McpToolkit::Gateway::Aggregator.new.tool_definitions(bearer_token: token)
+# => [{ "name" => "notifications__list_items", "description" => ..., "inputSchema" => ... }, ...]
+
+McpToolkit::Gateway::Aggregator.new.flush!               # bust every upstream's cache
+McpToolkit::Gateway::Aggregator.new.flush!("notifications")  # or just one
+```
+
+### Proxy a namespaced call
+
+Split a namespaced tool name via the registry, then proxy it. The caller passes
+the already-resolved account id (a scalar); it is forwarded as
+`_meta[config.account_meta_key]`.
+
+```ruby
+key, bare = McpToolkit.config.upstreams.split_tool_name("notifications__list_items")
+proxy = McpToolkit::Gateway::Proxy.new(
+  app_key: key, tool_name: bare, account_id: current_account_id, bearer_token: token
+)
+result = proxy.call({ "since" => "2026-01-01" })   # the upstream's `result` hash, verbatim
+```
+
+The proxy is transport-agnostic: an unregistered key raises
+`McpToolkit::Gateway::UnknownUpstream`, and an upstream call failure raises
+`McpToolkit::Gateway::UpstreamCallError` (carrying the upstream's `jsonrpc_error`
+/ `http_status`). Your dispatcher maps those to whatever error shape its transport
+speaks — the gem never welds the gateway to a protocol-error class.
+
+### Authority introspection endpoint (built in)
+
+Mounting `McpToolkit::Engine` also draws `POST /mcp/tokens/introspect`, backed by
+the gem-provided `McpToolkit::TokensController`. A central app configured with a
+`token_authenticator` answers introspection with **no controller of its own** —
+the Quickstart 2 hand-rolled controller becomes optional:
+
+```ruby
+# config/routes.rb
+mount McpToolkit::Engine => "/mcp"   # POST /mcp/tokens/introspect now works
+```
+
+Drawing it is safe even on an app that is not an authority: with no
+`token_authenticator`, it simply answers `{ "valid": false }`.
 
 ## Development
 

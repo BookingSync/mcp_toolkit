@@ -1,3 +1,51 @@
+## [0.4.0] - 2026-07-06
+
+### Added
+
+- **Gateway / upstream layer** (`McpToolkit::Gateway::*`) — the generic,
+  SDK-independent machinery a central app uses to aggregate *other* MCP servers
+  and proxy calls to them, previously an app-only concern. All app-specific values
+  (upstream URLs, account-selector meta key, logger, timeouts) are injected via
+  `McpToolkit::Configuration`; nothing in the layer names a deployment.
+  - `McpToolkit::Gateway::UpstreamRegistry` — a PER-CONFIG registry of upstream
+    servers (`Upstream = Data.define(:key, :url)` with `#name_for`), exposed as
+    `config.upstreams` and reset with a fresh config (test isolation for free).
+    API: `#register(key:, url:)` (blank url ignored), `#reset!`, `#all`, `#find`,
+    `#split_tool_name`. Config sugar: `config.register_upstream(key:, url:)`.
+  - `McpToolkit::Gateway::Client` — a minimal Streamable-HTTP MCP client
+    (`#tools_list`, `#tools_call`) with single-shot session-loss recovery (HTTP
+    404 / JSON-RPC `-32001`), SSE `data:` unwrapping, and content negotiation. Its
+    `Client::Error` (< `McpToolkit::Error`) carries `jsonrpc_error` / `http_status`
+    and references NO transport/protocol-error class — the consumer maps it. The
+    handshake `clientInfo` and protocol version come from config
+    (`DEFAULT_PROTOCOL_VERSION` falls back to the wrapped `mcp` SDK's latest).
+  - `McpToolkit::Gateway::Aggregator` — namespaces + caches (`config.cache_store`,
+    `config.upstream_list_ttl`) each upstream's tool list, pulled CONCURRENTLY via
+    concurrent-ruby (wrapped in `Rails.application.executor` when a booted Rails app
+    is present, plain futures otherwise). Only a non-empty pull is cached; a stale
+    empty is a miss (poisoned-cache self-heal); a failing upstream degrades (omit +
+    log) rather than breaking the list.
+  - `McpToolkit::Gateway::Proxy` — proxies a namespaced call, forwarding the
+    resolved `account_id` as `_meta[config.account_meta_key]`. An unknown key raises
+    `McpToolkit::Gateway::UnknownUpstream`; an upstream failure raises
+    `McpToolkit::Gateway::UpstreamCallError` (carrying `jsonrpc_error` /
+    `http_status`). Neither is mapped to a protocol-error class here.
+- **Authority introspection endpoint** — `McpToolkit::TokensController#introspect`,
+  drawn by the engine at `POST /mcp/tokens/introspect`, so a central app answers
+  introspection with no controller of its own. Its parent class is configurable via
+  `parent_controller` (like `ServerController`). Safe to draw unconditionally: with
+  no `token_authenticator` it answers `{ valid: false }`.
+- **`McpToolkit::Session#data`** — an opaque payload attachable at
+  `create!(data:)` and round-tripped through `find`, so an authority can bind a
+  session to a token id (letting a revoked token kill an in-flight session). The
+  gem does not interpret it; legacy rows default to `{}`.
+- `McpToolkit::Configuration` gains `upstreams` (a `Gateway::UpstreamRegistry`),
+  `register_upstream`, `upstream_timeout` (default `10`), `upstream_list_ttl`
+  (default `900`), and `logger` (default `nil`; all gateway/session call sites
+  guard with `logger&.`).
+- `concurrent-ruby` is now a direct dependency (already transitive via
+  activesupport) — the aggregator's parallel upstream pulls require it.
+
 ## [0.3.0] - 2026-07-03
 
 ### Added
@@ -119,5 +167,6 @@ hand-rolled controller wiring.
 
 ### Notes
 
-- The gateway / upstream-aggregation layer (`Mcp::Upstreams*`) is intentionally
-  out of scope (core-only).
+- The gateway / upstream-aggregation layer was intentionally out of scope for this
+  initial extraction. It was later extracted into the gem in 0.4.0 (see above), as
+  `McpToolkit::Gateway::*` — fully config-injected and app-agnostic.
