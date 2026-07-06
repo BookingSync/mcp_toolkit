@@ -96,6 +96,26 @@
   dispatcher negotiates.
 - **`config.rate_limiter` / `usage_recorder` / `usage_flusher`** — the authority
   transport's billing hooks as config callables (all default `nil` / no-op).
+- **Built-in rate limiting** — `McpToolkit::RateLimiter`, a fixed-window
+  per-principal counter backed by `config.cache_store`, plus
+  `config.rate_limit_max_requests` (Integer, default `nil` = OFF) and
+  `config.rate_limit_window` (seconds, default `3600`). When a cap is set, the
+  authority transport's `mcp_rate_limit!` counts each request, sets the
+  `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset` headers on
+  every capped response, and over the limit renders a JSON-RPC error (code
+  `-32029`) at HTTP `429` with a `Retry-After` header. Two new overridable hooks —
+  `mcp_rate_limit_max_requests` (default `config.rate_limit_max_requests`) and
+  `mcp_rate_limit_key` (default `mcp_principal.id`) — let a host keep the cap in
+  its own constant/model or bucket the counter differently. `config.rate_limiter`
+  remains as an escape hatch that fully replaces the built-in when set. A pure
+  host that sets no cap is unaffected.
+- **`config.superuser_resolver`** — an optional `->(principal) -> Boolean` making
+  superuser a first-class, OPTIONAL gem concept. `Authority::Context#superuser?`
+  calls it when set, else falls back to duck-typing `principal.superuser?` (false
+  when the principal doesn't respond to it). Together with the existing
+  `superusers_only!` resource flag and the authority tools' gating, this
+  formalizes superuser gating; the default (no resolver, no superuser-aware
+  principal) is "no superusers".
 - **Lazy `parent_controller` (Constraint B)** — the engine's `ServerController` /
   `TokensController` and the authority `ServerController` are no longer eager-
   loadable files; they are built from the CURRENT config by

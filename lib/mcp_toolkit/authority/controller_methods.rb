@@ -31,7 +31,9 @@
 #   mcp_config          -> the McpToolkit::Configuration (McpToolkit.config)
 #   mcp_authenticate!   -> set @mcp_principal or render 401 (local token auth via
 #                          config.token_authenticator, through Auth::Authority)
-#   mcp_rate_limit!     -> throttle (config.rate_limiter&.call)
+#   mcp_rate_limit!     -> throttle (built-in McpToolkit::RateLimiter when
+#                          config.rate_limit_max_requests is set; config.rate_limiter
+#                          escape hatch takes precedence; no-op when neither)
 #   mcp_track_usage     -> record one usage event (config.usage_recorder&.call)
 #   mcp_flush_usage     -> persist accumulated usage (config.usage_flusher&.call)
 #   mcp_resolve_account -> the account for one call (principal#default_account /
@@ -113,12 +115,66 @@ module McpToolkit::Authority::ControllerMethods
     mcp_render_unauthorized("Invalid or expired token") unless @mcp_principal
   end
 
-  # Throttle the request. The default delegates to `config.rate_limiter` (a
-  # `->(controller:, principal:)` that renders + halts when over the limit, or
-  # sets headers when under). A host whose limiter touches app models overrides
-  # this method wholesale.
+  # Throttle the request. Precedence:
+  #   1. `config.rate_limiter` escape hatch, if set (host-owned counting);
+  #   2. otherwise the built-in McpToolkit::RateLimiter when a cap is configured
+  #      (via the `mcp_rate_limit_max_requests` hook, default
+  #      `config.rate_limit_max_requests`);
+  #   3. otherwise a no-op (no cap => pure host unaffected).
+  # On every capped request it sets the X-RateLimit-* headers; over the limit it
+  # additionally sets Retry-After and renders the JSON-RPC error + 429 (halting
+  # the filter chain).
   def mcp_rate_limit!
-    mcp_config.rate_limiter&.call(controller: self, principal: mcp_principal)
+    return mcp_config.rate_limiter.call(controller: self, principal: mcp_principal) if mcp_config.rate_limiter
+
+    max = mcp_rate_limit_max_requests
+    return if max.nil?
+
+    result = McpToolkit::RateLimiter.new(
+      key: mcp_rate_limit_key,
+      max_requests: max,
+      window: mcp_config.rate_limit_window,
+      cache_store: mcp_config.cache_store
+    ).call
+
+    mcp_set_rate_limit_headers(result)
+    mcp_render_rate_limited(result) unless result.allowed?
+  end
+
+  # The per-window request cap the built-in limiter enforces, or nil to disable
+  # it. Default: `config.rate_limit_max_requests`. A host that keeps its cap in a
+  # constant/model overrides this (e.g. `= MyController::RATE_LIMIT`).
+  def mcp_rate_limit_max_requests
+    mcp_config.rate_limit_max_requests
+  end
+
+  # The identity the built-in limiter counts against. Default: the principal id.
+  # Override to bucket differently (e.g. per account, or a composite key).
+  def mcp_rate_limit_key
+    mcp_principal.id
+  end
+
+  # Sets the X-RateLimit-* headers from a RateLimiter result (on every capped
+  # response, allowed or not).
+  def mcp_set_rate_limit_headers(result)
+    response.headers["X-RateLimit-Limit"] = result.limit.to_s
+    response.headers["X-RateLimit-Reset"] = result.reset_at.to_s
+    response.headers["X-RateLimit-Remaining"] = result.remaining.to_s
+  end
+
+  # Renders the over-limit response: the Retry-After header plus a JSON-RPC error
+  # envelope (code -32029) at HTTP 429. Called as a before_action, so the render
+  # halts the request.
+  def mcp_render_rate_limited(result)
+    response.headers["Retry-After"] = result.retry_after.to_s
+    render json: {
+      jsonrpc: McpToolkit::Protocol::JSONRPC_VERSION,
+      id: nil,
+      error: {
+        code: -32_029,
+        message: "Rate limit exceeded. Retry after #{result.retry_after}s."
+      }
+    }, status: :too_many_requests
   end
 
   # Record one usage event for a single JSON-RPC call. The default delegates to

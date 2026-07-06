@@ -126,6 +126,39 @@ class McpToolkit::Configuration
   # @return [Integer] session sliding-TTL in seconds.
   attr_accessor :session_ttl
 
+  # --- rate limiting ---------------------------------------------------------
+
+  # The built-in per-principal request cap enforced by the authority transport
+  # (McpToolkit::Authority::ControllerMethods#mcp_rate_limit!), counted against
+  # `cache_store` via McpToolkit::RateLimiter. nil (the default) DISABLES rate
+  # limiting entirely, so a pure host is unaffected until it opts in. Set an
+  # Integer to cap each principal to that many requests per `rate_limit_window`.
+  # The default `mcp_rate_limit!` reads this through the overridable
+  # `mcp_rate_limit_max_requests` hook, so a host that keeps the cap in its own
+  # constant/model overrides that hook rather than this value.
+  #
+  # @return [Integer, nil]
+  attr_accessor :rate_limit_max_requests
+
+  # The fixed rate-limit window, in seconds (default 3600 = 1 hour). Ignored
+  # while `rate_limit_max_requests` is nil.
+  #
+  # @return [Integer]
+  attr_accessor :rate_limit_window
+
+  # --- superuser (optional, first-class) -------------------------------------
+
+  # Optional resolver deciding whether a principal is a SUPERUSER — a cross-tenant
+  # caller that may reach `superusers_only!` resources. `->(principal) -> Boolean`.
+  # When set, McpToolkit::Authority::Context#superuser? calls it; when nil (the
+  # default) the context falls back to duck-typing `principal.superuser?` (false
+  # when the principal doesn't respond to it). Superuser is FULLY OPTIONAL: a host
+  # with no such concept leaves this nil and flags no `superusers_only!` resource,
+  # so no caller is ever a superuser.
+  #
+  # @return [#call, nil]
+  attr_accessor :superuser_resolver
+
   # --- filtering -------------------------------------------------------------
 
   # Escapes LIKE wildcards in `matches` / `does_not_match` filter values so they
@@ -203,8 +236,12 @@ class McpToolkit::Configuration
   # hook METHOD on its McpToolkit::Authority::ServerController subclass instead;
   # then these stay nil. All default to nil (a no-op).
 
-  # Throttles a request. `->(controller:, principal:)`; renders + halts when over
-  # the limit (or sets rate-limit headers when under). nil = no throttling.
+  # OPTIONAL escape hatch that FULLY REPLACES the built-in limiter: a
+  # `->(controller:, principal:)` that renders + halts when over the limit (or
+  # sets rate-limit headers when under). When set, `mcp_rate_limit!` delegates to
+  # it and the built-in (`rate_limit_max_requests`) is skipped. nil (the default)
+  # means the built-in runs instead. Most hosts want the built-in; reach for this
+  # only when the counting itself must live in app code.
   #
   # @return [#call, nil]
   attr_accessor :rate_limiter
@@ -303,12 +340,16 @@ class McpToolkit::Configuration
   end
 
   # The authority transport's injection points all default to nil (a no-op): a
-  # pure satellite/gateway never touches them.
+  # pure satellite/gateway never touches them. `rate_limit_window` is the sole
+  # non-nil default (the window size only matters once a cap opts in).
   def initialize_authority_hook_defaults
     @rate_limiter = nil
     @usage_recorder = nil
     @usage_flusher = nil
     @tool_provider = nil
+    @rate_limit_max_requests = nil # nil = rate limiting disabled
+    @rate_limit_window = 3600 # 1 hour
+    @superuser_resolver = nil # nil = duck-type principal.superuser?
   end
 
   # Config sugar: register a gateway upstream. Delegates to `upstreams.register`,

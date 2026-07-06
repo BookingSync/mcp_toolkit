@@ -265,6 +265,9 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `tool_provider` | `nil` | authority: the host's api-agnostic tool catalog (see below) |
 | `generic_tool_name_prefix` | `""` | authority: prefix namespacing the four generic Registry-backed tools (e.g. `"foo_"` → `foo_resources` …) |
 | `rate_limiter` / `usage_recorder` / `usage_flusher` | `nil` | authority transport billing hooks (config callables) |
+| `rate_limit_max_requests` | `nil` (off) | authority: per-principal request cap for the built-in `RateLimiter`; `nil` disables rate limiting |
+| `rate_limit_window` | `3600` | authority: fixed rate-limit window (s); ignored while `rate_limit_max_requests` is `nil` |
+| `superuser_resolver` | `nil` | optional `->(principal) -> Boolean` for `Context#superuser?`; `nil` = duck-type `principal.superuser?` |
 | `parent_controller` | `"ActionController::Base"` | superclass of the engine's controllers, read lazily (set to `"ActionController::API"` for the authority, or `"ApplicationController"` for `helper_method` compat) |
 | `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
 | `account_id_header` | `"X-MCP-Account-ID"` | header fallback for the account selector |
@@ -526,6 +529,22 @@ Every billing/tenancy step is an overridable hook: `mcp_authenticate!`,
 `mcp_session_data`, `mcp_dispatch`, `mcp_health_payload`, `mcp_config`. The
 per-request loop (`resolve account → track usage → dispatch`) is preserved across
 batches, so usage metering survives a mixed-account batch.
+
+**Rate limiting is built in.** Set `config.rate_limit_max_requests` (and,
+optionally, `config.rate_limit_window`, default 1 hour) and the default
+`mcp_rate_limit!` throttles each principal via `McpToolkit::RateLimiter` against
+`config.cache_store` — no subclass needed. It sets the `X-RateLimit-*` headers on
+every capped response and, over the limit, renders a JSON-RPC `-32029` error at
+`429` with `Retry-After`. A host that keeps its cap in a constant/model overrides
+the small `mcp_rate_limit_max_requests` hook (default `config.rate_limit_max_requests`);
+`mcp_rate_limit_key` (default `mcp_principal.id`) buckets the counter. Leaving the
+cap `nil` disables throttling entirely; `config.rate_limiter` stays as an escape
+hatch that replaces the built-in wholesale.
+
+**Superuser is an optional, first-class concept.** Set
+`config.superuser_resolver = ->(principal) { ... }` and `Context#superuser?` uses
+it to gate `superusers_only!` resources; with no resolver it duck-types
+`principal.superuser?`, and with neither, no caller is ever a superuser.
 
 Point your `POST /mcp` route at the subclass (or mount the engine for a pure host);
 keep `POST /mcp/tokens/introspect` on the gem's `TokensController`.

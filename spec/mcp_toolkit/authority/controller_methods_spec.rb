@@ -114,6 +114,64 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
     end
   end
 
+  # ---- built-in rate limiting (config.rate_limit_max_requests) -------------
+
+  describe "#mcp_rate_limit! (built-in McpToolkit::RateLimiter)" do
+    before do
+      authenticate_as(principal)
+      McpToolkit.config.rate_limit_max_requests = 2
+      # reset_config! gives a fresh MemoryStore per example, so counts are isolated.
+    end
+
+    it "sets the X-RateLimit-* headers on an allowed request and renders nothing" do
+      controller.send(:mcp_rate_limit!)
+
+      headers = controller.response.headers
+      expect(headers["X-RateLimit-Limit"]).to eq("2")
+      expect(headers["X-RateLimit-Remaining"]).to eq("1")
+      expect(headers["X-RateLimit-Reset"]).to be_present
+      expect(controller.rendered).to be_nil
+    end
+
+    it "renders the JSON-RPC -32029 error at 429 with Retry-After once the limit is exceeded" do
+      3.times { controller.send(:mcp_rate_limit!) } # keyed on principal.id, same window
+
+      rendered = controller.rendered
+      expect(rendered[:status]).to eq(:too_many_requests)
+      expect(rendered[:json][:error][:code]).to eq(-32_029)
+      expect(rendered[:json][:error][:message]).to include("Rate limit exceeded")
+      expect(controller.response.headers["Retry-After"]).to be_present
+      expect(controller.response.headers["X-RateLimit-Remaining"]).to eq("0")
+    end
+
+    it "keys the counter via the overridable mcp_rate_limit_key (default principal.id)" do
+      expect(controller.send(:mcp_rate_limit_key)).to eq(principal.id)
+    end
+
+    it "reads the cap via the overridable mcp_rate_limit_max_requests hook" do
+      expect(controller.send(:mcp_rate_limit_max_requests)).to eq(2)
+    end
+
+    it "is a no-op when no cap and no rate_limiter are configured" do
+      McpToolkit.config.rate_limit_max_requests = nil
+
+      controller.send(:mcp_rate_limit!)
+
+      expect(controller.rendered).to be_nil
+      expect(controller.response.headers["X-RateLimit-Limit"]).to be_nil
+    end
+
+    it "lets the config.rate_limiter escape hatch take precedence over the built-in" do
+      seen = nil
+      McpToolkit.config.rate_limiter = ->(controller:, principal:) { seen = { controller:, principal: } }
+
+      controller.send(:mcp_rate_limit!)
+
+      expect(seen).to eq(controller:, principal:)
+      expect(controller.response.headers["X-RateLimit-Limit"]).to be_nil
+    end
+  end
+
   describe "#mcp_resolve_account (duck-typed on the principal)" do
     before { authenticate_as(principal) }
 
