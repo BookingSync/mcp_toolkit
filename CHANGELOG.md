@@ -1,4 +1,4 @@
-## [0.5.0] - 2026-07-06
+## [0.4.0] - 2026-07-06
 
 ### Added
 
@@ -71,10 +71,6 @@
 
 - The engine's `app/controllers/mcp_toolkit/{server_controller,tokens_controller}.rb`
   files, replaced by the lazy builder above (their routes + behavior are unchanged).
-
-## [0.4.0] - 2026-07-06
-
-### Added
 
 - **Gateway / upstream layer** (`McpToolkit::Gateway::*`) — the generic,
   SDK-independent machinery a central app uses to aggregate *other* MCP servers
