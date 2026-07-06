@@ -249,6 +249,7 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | Setting | Default | Purpose |
 |---|---|---|
 | `server_name` / `server_version` / `server_instructions` | `"mcp-server"` / `"1.0.0"` / `nil` | advertised on `initialize` |
+| `gateway_client_name` / `gateway_client_version` | `server_name` / `server_version` | `clientInfo` a gateway presents to its upstreams (identity split) |
 | `serializer_base` | `McpToolkit::Serializer::Base` | the default base to subclass |
 | `auth_role` | `:satellite` | `:satellite` or `:authority` |
 | `central_app_url` | `nil` | satellite: base URL of the auth authority |
@@ -259,8 +260,11 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `token_authenticator` | `nil` | authority: `->(plaintext) { token_or_nil }` |
 | `cache_store` | `MemoryStore` | sessions + introspection cache (set to `Rails.cache`) |
 | `session_ttl` | `3600` | session sliding TTL (s) |
-| `protocol_version` | `nil` (negotiate) | pin an MCP protocol version |
-| `parent_controller` | `"ActionController::Base"` | superclass of the engine's `ServerController` (set to `"ApplicationController"` for `helper_method` compat) |
+| `protocol_version` | `nil` (negotiate) | pin an MCP protocol version (satellite/upstream client) |
+| `supported_protocol_versions` | `Protocol::SUPPORTED_VERSIONS` | version set the authority dispatcher negotiates |
+| `tool_provider` | `nil` | authority: the host's api-agnostic tool catalog (see below) |
+| `rate_limiter` / `usage_recorder` / `usage_flusher` | `nil` | authority transport billing hooks (config callables) |
+| `parent_controller` | `"ActionController::Base"` | superclass of the engine's controllers, read lazily (set to `"ActionController::API"` for the authority, or `"ApplicationController"` for `helper_method` compat) |
 | `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
 | `account_id_header` | `"X-MCP-Account-ID"` | header fallback for the account selector |
 | `upstreams` | empty registry | gateway: registered upstream MCP servers (register via `register_upstream`) |
@@ -277,11 +281,22 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
   `#default_required_permissions_scope`
 - `McpToolkit::Serializer::Base` (DSL: `attributes`, `has_one`, `has_many`,
   `translates`)
-- `McpToolkit::Server.build(server_context:, config:, extra_tools:)`
+- `McpToolkit::Server.build(server_context:, config:, extra_tools:)` (satellite,
+  SDK-backed)
 - `McpToolkit::Engine` (mountable; `mount McpToolkit::Engine => "/mcp"`) +
-  `McpToolkit::ServerController` (its controller; parent via `parent_controller`)
-- `McpToolkit::Transport::ControllerMethods` (standalone controller concern;
-  override `mcp_config` / `mcp_extra_tools`)
+  `McpToolkit::ServerController` (its controller; parent via `parent_controller`,
+  built lazily)
+- `McpToolkit::Transport::ControllerMethods` (standalone satellite controller
+  concern; override `mcp_config` / `mcp_extra_tools`)
+- **Authority dispatch path** (a first-party server serving its own tools +
+  upstreams, no SDK): `McpToolkit::Protocol`,
+  `McpToolkit::Dispatcher.new(context:, config:)#handle_request`,
+  `McpToolkit::Authority::ControllerMethods` (the transport concern, all
+  billing/tenancy steps overridable hooks),
+  `McpToolkit::Authority::ServerController` (subclassable base),
+  `McpToolkit::Authority::Context` (`account` / `principal` / `bearer_token` /
+  `superuser?`), `McpToolkit::Tools::AuthorityBase` (optional tool base), and
+  `config.tool_provider` (the api-agnostic tool seam)
 - `McpToolkit::Session` (opaque `#data` payload, e.g. to bind a session to a token id)
 - `McpToolkit::Auth::Introspection` / `Authenticator` (satellite),
   `McpToolkit::Auth::Authority` (authority)
@@ -366,6 +381,99 @@ mount McpToolkit::Engine => "/mcp"   # POST /mcp/tokens/introspect now works
 
 Drawing it is safe even on an app that is not an authority: with no
 `token_authenticator`, it simply answers `{ "valid": false }`.
+
+## Authority + gateway server (own tools + upstreams, no SDK)
+
+Beyond the SDK-backed satellite path, the toolkit also ships a **hand-rolled
+dispatch path** for a first-party server that authenticates tokens LOCALLY and
+serves its OWN tools — and, as a gateway, aggregates + proxies upstreams — with
+the official `mcp` SDK out of the request path. The gem carries the two dispatch
+front-ends side by side: `McpToolkit::Server.build` (satellite) and
+`McpToolkit::Dispatcher` (authority). The wire behavior of the authority path —
+top-level JSON-RPC tool-error codes, `initialize` capabilities, 3-version
+negotiation, verbatim upstream error relay, the custom `list_changed` cache-bust —
+is fixed, so a monetized endpoint keeps its byte contract.
+
+### 1. Expose your tools through a provider (the api-agnostic seam)
+
+The gem never sees your API layer. It serves your tools only through a duck-typed
+`tool_provider` you register:
+
+```ruby
+# provider.tool_definitions(context) -> [{ name:, description:, inputSchema: }]
+# provider.find(name)                -> a tool object, or nil
+#
+# a tool object responds to:
+#   #required_permissions_scope -> String | nil     (the gem's per-tool scope gate)
+#   #call(context:, **arguments) -> Hash | String   (wrapped into { content: [...] })
+McpToolkit.configure do |c|
+  c.tool_provider = MyToolProvider.new   # your glue over your own tool classes
+end
+```
+
+A tool MAY subclass the bundled base (or be any object satisfying the contract):
+
+```ruby
+class ListWidgets < McpToolkit::Tools::AuthorityBase
+  tool_name "list_widgets"
+  description "List widgets for the active account."
+  required_permissions_scope "widgets__read"      # gem gates this centrally
+  input_schema { { type: "object", properties: { limit: { type: "integer" } } } }
+
+  # `account` / `principal` / `bearer_token` / `superuser?` come from the context.
+  def call(limit: 25)
+    Widget.for(account).limit(limit).map(&:as_json)  # your domain, behind #call
+  end
+end
+```
+
+`context` is an `McpToolkit::Authority::Context` (`account`, `principal`,
+`bearer_token`, `superuser?`). It is re-created for EVERY JSON-RPC call — including
+each element of a batch — so a mixed-account batch resolves the right account per
+call.
+
+### 2. Serve it through the authority transport
+
+A **pure host** mounts the engine's authority base and drives everything from
+config callables. A host whose rate-limit / usage / account logic touches its own
+models **subclasses** the base and overrides the hook methods:
+
+```ruby
+class ServerController < McpToolkit::Authority::ServerController
+  # Local token auth, session binding, and account resolution have working
+  # defaults (duck-typed on your token via config.token_authenticator). Override
+  # only what touches your models:
+  def mcp_rate_limit!
+    # ...your limiter; render + halt when over the limit...
+  end
+
+  def mcp_track_usage(request_data, account)
+    # ...accumulate one usage row for this call (fires per batch element)...
+  end
+
+  def mcp_flush_usage        = # ...bulk-insert the accumulated rows...
+  def mcp_session_data       = { token_id: mcp_principal.id }  # revoked token kills the session
+end
+```
+
+Every billing/tenancy step is an overridable hook: `mcp_authenticate!`,
+`mcp_rate_limit!`, `mcp_track_usage`, `mcp_flush_usage`, `mcp_resolve_account`,
+`mcp_session_data`, `mcp_dispatch`, `mcp_health_payload`, `mcp_config`. The
+per-request loop (`resolve account → track usage → dispatch`) is preserved across
+batches, so usage metering survives a mixed-account batch.
+
+Point your `POST /mcp` route at the subclass (or mount the engine for a pure host);
+keep `POST /mcp/tokens/introspect` on the gem's `TokensController`.
+
+### Lazy `parent_controller`
+
+The gem's controllers subclass `config.parent_controller`. That parent is read
+only at **build** time — the controllers are built by
+`McpToolkit.build_engine_controllers!`, triggered lazily on first reference and
+reset on each reload by the engine's `to_prepare` — so it is always resolved AFTER
+your app's initializers/to_prepare. Your whole MCP initializer can therefore live
+in `to_prepare`. Set `c.parent_controller = "ActionController::API"` for the
+authority.
 
 ## Development
 

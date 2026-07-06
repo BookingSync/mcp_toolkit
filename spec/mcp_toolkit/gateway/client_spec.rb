@@ -246,6 +246,46 @@ RSpec.describe McpToolkit::Gateway::Client do
     end
   end
 
+  describe "handshake clientInfo identity split" do
+    before do
+      stub_initialize
+      stub_initialized
+      stub_method("tools/list", json_response("tools" => []))
+    end
+
+    def sent_client_info
+      request = nil
+      expect(a_request(:post, upstream_url).with { |req|
+        parsed = JSON.parse(req.body)
+        next false unless parsed["method"] == "initialize"
+
+        request = parsed["params"]["clientInfo"]
+        true
+      }).to have_been_made
+      request
+    end
+
+    it "presents gateway_client_name/version (NOT server_name/version) when the host split them" do
+      McpToolkit.config.server_name = "acme-mcp"          # advertised to OUR callers
+      McpToolkit.config.server_version = "3.0.0"
+      McpToolkit.config.gateway_client_name = "acme-mcp-gateway"  # presented to upstreams
+      McpToolkit.config.gateway_client_version = "9.9.9"
+
+      client.tools_list
+
+      expect(sent_client_info).to eq("name" => "acme-mcp-gateway", "version" => "9.9.9")
+    end
+
+    it "falls back to the server identity when the gateway identity is unset" do
+      McpToolkit.config.server_name = "acme-mcp"
+      McpToolkit.config.server_version = "3.0.0"
+
+      client.tools_list
+
+      expect(sent_client_info).to eq("name" => "acme-mcp", "version" => "3.0.0")
+    end
+  end
+
   describe "DEFAULT_PROTOCOL_VERSION" do
     it "sources the wrapped mcp SDK's latest-supported version" do
       expect(described_class::DEFAULT_PROTOCOL_VERSION)

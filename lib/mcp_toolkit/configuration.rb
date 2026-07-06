@@ -25,6 +25,24 @@ class McpToolkit::Configuration
   # @return [String, nil] human-readable `instructions` returned on `initialize`.
   attr_accessor :server_instructions
 
+  # --- gateway client identity (identity split) ------------------------------
+
+  # The `clientInfo` an app presents when it acts as a GATEWAY talking to its
+  # upstream MCP servers (McpToolkit::Gateway::Client's handshake). Split from the
+  # SERVER identity (`server_name`/`server_version`, advertised to the app's OWN
+  # callers) so an authority can present its real server identity downstream while
+  # keeping its upstream handshake byte-identical to a prior deployment. Both
+  # default to the server identity, so a satellite/gateway that doesn't care sets
+  # nothing.
+  #
+  #   c.server_name         = "acme-mcp"          # advertised to our callers
+  #   c.gateway_client_name = "acme-mcp-gateway"  # presented to our upstreams
+  #
+  # @return [String] gateway handshake client name (defaults to `server_name`).
+  attr_writer :gateway_client_name
+  # @return [String] gateway handshake client version (defaults to `server_version`).
+  attr_writer :gateway_client_version
+
   # --- serialization ---------------------------------------------------------
 
   # The DEFAULT serializer base class. A `Resource` registration that does not
@@ -124,6 +142,14 @@ class McpToolkit::Configuration
   #   nil lets the gem negotiate (recommended). Set only to force an older spec.
   attr_accessor :protocol_version
 
+  # The protocol versions the hand-rolled AUTHORITY dispatcher
+  # (McpToolkit::Dispatcher) negotiates, newest first. `initialize` echoes the
+  # requested version when it is in this set, else the first (latest). Defaults to
+  # McpToolkit::Protocol::SUPPORTED_VERSIONS; override to pin a host's own set.
+  #
+  # @return [Array<String>]
+  attr_accessor :supported_protocol_versions
+
   # The parent class (as a String, resolved via `constantize`) of the
   # gem-provided McpToolkit::ServerController that McpToolkit::Engine mounts.
   # Doorkeeper-style indirection so a satellite mounting the engine can keep
@@ -169,6 +195,48 @@ class McpToolkit::Configuration
   # @return [McpToolkit::Gateway::UpstreamRegistry]
   attr_reader :upstreams
 
+  # --- authority hooks -------------------------------------------------------
+  #
+  # Injection points for the AUTHORITY transport (McpToolkit::Authority::
+  # ControllerMethods) so a PURE host drives billing/tenancy from config without
+  # subclassing. A host whose logic touches its own models overrides the matching
+  # hook METHOD on its McpToolkit::Authority::ServerController subclass instead;
+  # then these stay nil. All default to nil (a no-op).
+
+  # Throttles a request. `->(controller:, principal:)`; renders + halts when over
+  # the limit (or sets rate-limit headers when under). nil = no throttling.
+  #
+  # @return [#call, nil]
+  attr_accessor :rate_limiter
+
+  # Records ONE usage event for a single JSON-RPC call (called per batch element).
+  # `->(request_data:, account:, principal:, controller:)`. MUST never affect the
+  # MCP response. nil = no metering.
+  #
+  # @return [#call, nil]
+  attr_accessor :usage_recorder
+
+  # Persists accumulated usage after the response (an after_action).
+  # `->(controller:)`. MUST never affect the MCP response. nil = no flush.
+  #
+  # @return [#call, nil]
+  attr_accessor :usage_flusher
+
+  # The host's tool catalog — the api-agnostic seam. Duck-typed; the dispatcher
+  # calls:
+  #
+  #   provider.tool_definitions(context) -> [{ name:, description:, inputSchema: }]
+  #   provider.find(name)                -> a tool object, or nil
+  #
+  # where a tool object responds to `#required_permissions_scope` (String|nil, the
+  # gem's scope gate) and `#call(context:, **arguments)` (returns Hash|String,
+  # which the gem wraps into `{ content: [{ type: "text", text: }] }`). See
+  # McpToolkit::Tools::AuthorityBase for a base that satisfies this. nil = the host
+  # contributes no own tools (a pure gateway).
+  #
+  # @return [#tool_definitions, #find, nil]
+  attr_accessor :tool_provider
+
   # --- diagnostics -----------------------------------------------------------
 
   # Optional logger for gateway/session diagnostics. All call sites guard with
@@ -183,6 +251,9 @@ class McpToolkit::Configuration
     @server_name = "mcp-server"
     @server_version = "1.0.0"
     @server_instructions = nil
+
+    @gateway_client_name = nil
+    @gateway_client_version = nil
 
     @serializer_base = nil # set lazily in #serializer_base to avoid load-order issues
 
@@ -201,9 +272,12 @@ class McpToolkit::Configuration
     @sql_sanitizer = McpToolkit::SqlSanitizer.new
 
     @protocol_version = nil
+    @supported_protocol_versions = McpToolkit::Protocol::SUPPORTED_VERSIONS
     @parent_controller = "ActionController::Base"
     @account_meta_key = "mcp-toolkit/account-id"
     @account_id_header = "X-MCP-Account-ID"
+
+    initialize_authority_hook_defaults
 
     @upstream_timeout = 10
     @upstream_list_ttl = 900 # 15 minutes
@@ -213,12 +287,33 @@ class McpToolkit::Configuration
     @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
   end
 
+  # The authority transport's injection points all default to nil (a no-op): a
+  # pure satellite/gateway never touches them.
+  def initialize_authority_hook_defaults
+    @rate_limiter = nil
+    @usage_recorder = nil
+    @usage_flusher = nil
+    @tool_provider = nil
+  end
+
   # Config sugar: register a gateway upstream. Delegates to `upstreams.register`,
   # so a blank url is ignored (an unconfigured upstream is simply absent).
   #
   #   c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
   def register_upstream(key:, url:)
     upstreams.register(key:, url:)
+  end
+
+  # The gateway handshake client name, defaulting to the server identity when the
+  # host hasn't split it. Read (not stored) so a `server_name` change before the
+  # split is set still flows through.
+  def gateway_client_name
+    @gateway_client_name || server_name
+  end
+
+  # The gateway handshake client version, defaulting to the server version.
+  def gateway_client_version
+    @gateway_client_version || server_version
   end
 
   # The serializer base, lazily defaulting to the gem's bundled DSL base. Lazy so

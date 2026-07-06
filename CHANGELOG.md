@@ -1,3 +1,77 @@
+## [0.5.0] - 2026-07-06
+
+### Added
+
+- **Authority dispatch path** — a hand-rolled JSON-RPC front-end for a first-party
+  server that authenticates tokens locally and serves its OWN tools (and, as a
+  gateway, aggregates + proxies upstreams) WITHOUT the official `mcp` SDK in the
+  request path. It coexists with the SDK-backed satellite path
+  (`McpToolkit::Server.build`) by design — the gem now carries two dispatch
+  front-ends, each for its role. The satellite path is unchanged.
+  - `McpToolkit::Protocol` — JSON-RPC constants + envelope helpers
+    (`SUPPORTED_VERSIONS`, `LATEST_VERSION`, `JSONRPC_VERSION`, `ErrorCodes`,
+    `Error` + subclasses with `#code`/`#data`/`#to_h`, `success_response` /
+    `error_response`). The byte contract of a first-party endpoint's error
+    envelope + version negotiation.
+  - `McpToolkit::Dispatcher` — `new(context:, config:)` + `#handle_request(request)`.
+    Dispatches `initialize` / `initialized` / `tools/list` / `tools/call` / `ping`
+    and the custom `notifications/<app>/tools/list_changed` cache-bust. `tools/list`
+    merges the host's own tool definitions with the gateway's namespaced upstream
+    tools; `tools/call` routes a namespaced name to `Gateway::Proxy` (translating
+    `UnknownUpstream` → method-not-found and relaying an upstream JSON-RPC error
+    verbatim) or a host tool (scope-gated) otherwise. Server identity + negotiated
+    versions come from config; NO SDK touchpoint.
+  - `McpToolkit::Authority::ControllerMethods` — the authority transport as an
+    includable concern. Every billing/tenancy step is an overridable hook
+    (`mcp_authenticate!`, `mcp_rate_limit!`, `mcp_track_usage`, `mcp_flush_usage`,
+    `mcp_resolve_account`, `mcp_session_data`, `mcp_dispatch`, `mcp_health_payload`,
+    `mcp_config`), each defaulting to a config callable so a PURE host needs no
+    subclass. The per-request loop RE-RESOLVES the account for every JSON-RPC call
+    — including each element of a batch — so a mixed-account batch still meters one
+    usage event per call against the right account (the batch is never delegated to
+    a bulk handler that couldn't re-resolve per element).
+  - `McpToolkit::Authority::ServerController` — a base controller (concern wired in,
+    lazily-parented) a host subclasses when its hooks touch app models (the
+    recommended path).
+  - `McpToolkit::Authority::Context` — the per-request context threaded into the
+    dispatcher + tools: `account`, `principal`, `bearer_token`, and a derived
+    `superuser?` (duck-typed off the principal).
+  - `McpToolkit::Tools::AuthorityBase` — an optional base for a host's own tools
+    (class DSL `tool_name` / `description` / `input_schema` /
+    `required_permissions_scope` / `definition`; `.call(context:, **arguments)`
+    entry; context accessors; `ensure_resource_accessible!`; ArgumentError →
+    InvalidParams / StandardError → InternalError mapping). Host tools plug in
+    through the api-agnostic `config.tool_provider` seam — the gem never references
+    a host's API layer, serializers, or resource catalog.
+- **`config.tool_provider`** — the api-agnostic tool seam. Duck-typed:
+  `provider.tool_definitions(context) -> [{ name:, description:, inputSchema: }]`
+  (context lets the host hide superuser-only tools) and `provider.find(name) -> a
+  tool object` (responding to `#required_permissions_scope` + `#call(context:,
+  **arguments)`). The dispatcher enforces the per-tool scope gate CENTRALLY.
+- **Server-vs-gateway identity split** — `config.gateway_client_name` /
+  `gateway_client_version` (each defaulting to `server_name` / `server_version`).
+  `Gateway::Client`'s handshake `clientInfo` now reads the GATEWAY identity, so an
+  authority can advertise its own `server_name` to its callers while keeping its
+  upstream handshake byte-identical.
+- **`config.supported_protocol_versions`** (default
+  `McpToolkit::Protocol::SUPPORTED_VERSIONS`) — the version set the authority
+  dispatcher negotiates.
+- **`config.rate_limiter` / `usage_recorder` / `usage_flusher`** — the authority
+  transport's billing hooks as config callables (all default `nil` / no-op).
+- **Lazy `parent_controller` (Constraint B)** — the engine's `ServerController` /
+  `TokensController` and the authority `ServerController` are no longer eager-
+  loadable files; they are built from the CURRENT config by
+  `McpToolkit.build_engine_controllers!`, triggered lazily via `const_missing` and
+  reset on each reload by the engine's `config.to_prepare`. The parent is therefore
+  read only at build time — after the host's initializers/to_prepare — so a host's
+  whole MCP initializer can live in `to_prepare`. `TokensController#introspect`
+  behavior is preserved exactly.
+
+### Removed
+
+- The engine's `app/controllers/mcp_toolkit/{server_controller,tokens_controller}.rb`
+  files, replaced by the lazy builder above (their routes + behavior are unchanged).
+
 ## [0.4.0] - 2026-07-06
 
 ### Added

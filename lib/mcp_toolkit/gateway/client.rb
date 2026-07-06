@@ -143,7 +143,14 @@ class McpToolkit::Gateway::Client
       jsonrpc_request("initialize", {
                         "protocolVersion" => protocol_version,
                         "capabilities" => {},
-                        "clientInfo" => { "name" => config.server_name, "version" => config.server_version }
+                        # The GATEWAY-client identity (falls back to the server
+                        # identity), split so an authority can advertise its own
+                        # server_name to callers while keeping this upstream
+                        # handshake byte-identical.
+                        "clientInfo" => {
+                          "name" => config.gateway_client_name,
+                          "version" => config.gateway_client_version
+                        }
                       })
     )
     @session_id = response.headers[SESSION_HEADER].presence

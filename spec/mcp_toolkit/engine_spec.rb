@@ -18,22 +18,22 @@ require "spec_helper"
 RSpec.describe "Mountable engine + gem controller" do
   describe "McpToolkit::ServerController (engine controller)" do
     # A fake ActionController::Base: provides only the class-level hooks the
-    # transport concern's `included do` block invokes.
+    # transport concerns' `included do` blocks invoke.
     before do
       stub_const("FakeActionControllerBase", Class.new do
         def self.before_action(*); end
+        def self.after_action(*); end
         # The concern guards protect_from_forgery behind respond_to?; omit it so
         # that branch is exercised (no CSRF machinery needed in a unit test).
       end)
       McpToolkit.config.parent_controller = "FakeActionControllerBase"
 
-      # Load the gem-provided controller against the configured parent. It lives
-      # under app/controllers (outside the lib loader), so require it by path.
-      path = File.expand_path("../../app/controllers/mcp_toolkit/server_controller.rb", __dir__)
-      load path
+      # The engine controllers are no longer files: they are built lazily from the
+      # configured parent by the builder (Constraint B). Build them explicitly.
+      McpToolkit.build_engine_controllers!
     end
 
-    after { McpToolkit.send(:remove_const, :ServerController) if McpToolkit.const_defined?(:ServerController, false) }
+    after { McpToolkit.reset_engine_controllers! }
 
     it "inherits the configured parent_controller" do
       expect(McpToolkit::ServerController.superclass).to eq(FakeActionControllerBase)
@@ -74,9 +74,14 @@ RSpec.describe "Mountable engine + gem controller" do
     before do
       recorder = route_recorder
       stub_const("Rails", Module.new)
+      # The engine class body now also calls `config.to_prepare { ... }` (lazy
+      # controller reset), so the fake base must expose a `config` responding to
+      # `to_prepare` (a no-op here — nothing is reloaded in this unit test).
+      config_double = Class.new { def to_prepare(*); end }.new
       engine_base = Class.new do
         define_singleton_method(:isolate_namespace) { |_mod| }
       end
+      engine_base.define_singleton_method(:config) { config_double }
       stub_const("Rails::Engine", engine_base)
 
       load File.expand_path("../../lib/mcp_toolkit/engine.rb", __dir__)
