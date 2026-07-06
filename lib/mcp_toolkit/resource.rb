@@ -37,6 +37,7 @@ class McpToolkit::Resource
     @note = nil
     @superusers_only = false
     @filterable = {}
+    @filterable_source = nil
     @custom_filters = {}
     @required_permissions_scope = nil
   end
@@ -146,24 +147,35 @@ class McpToolkit::Resource
   #
   # Unmapped/unknown keys are rejected by the list executor, never silently
   # dropped, so a typo surfaces as actionable feedback.
-  def filterable(mapping = nil)
-    return @filterable if mapping.nil?
+  # Accepts a Hash (merged now) OR a callable returning a Hash (resolved LAZILY on
+  # first read). The lazy form lets a host derive the map from something that must
+  # NOT be touched at registration/boot time — e.g. a DB-backed column list
+  # (`Model.column_names`): registration typically runs inside an initializer's
+  # `to_prepare`, before the database may exist (e.g. CI's `db:create`), so hitting
+  # the DB there aborts boot. A callable source is invoked at most once — on the
+  # first read (a tool call, when the DB is present) — then memoized.
+  def filterable(mapping = nil, &block)
+    source = block || mapping
+    return filterable_columns if source.nil?
 
-    mapping.each do |request_key, column|
-      @filterable[request_key.to_sym] = column.to_sym
+    if source.respond_to?(:call)
+      @filterable_source = source
+    else
+      merge_filterable!(source)
     end
-    @filterable
+    self
   end
 
   # Request-facing filter keys (symbols, sorted) this resource can be filtered
   # by. Surfaced via the `resource_schema` tool.
   def filterable_keys
-    @filterable.keys.sort
+    filterable_columns.keys.sort
   end
 
   # Request-facing filter key (symbol) => backing column (symbol). Consumed by
   # the list executor to build the WHERE clause.
   def filterable_columns
+    resolve_filterable_source!
     @filterable
   end
 
@@ -191,5 +203,23 @@ class McpToolkit::Resource
     return [] unless serializer.respond_to?(:declared_associations)
 
     serializer.declared_associations
+  end
+
+  private
+
+  # Resolves a lazily-provided filterable source (a callable) exactly once — on the
+  # first `filterable_columns` / `filterable_keys` read — then drops it, so later
+  # reads are pure Hash access. This is what keeps a DB-derived map (e.g.
+  # `Model.column_names`) out of registration/boot time.
+  def resolve_filterable_source!
+    return unless @filterable_source
+
+    source = @filterable_source
+    @filterable_source = nil
+    merge_filterable!(source.call || {})
+  end
+
+  def merge_filterable!(mapping)
+    mapping.each { |request_key, column| @filterable[request_key.to_sym] = column.to_sym }
   end
 end
