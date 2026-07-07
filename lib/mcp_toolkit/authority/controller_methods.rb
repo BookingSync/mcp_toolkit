@@ -38,9 +38,9 @@
 #   mcp_flush_usage     -> persist accumulated usage (config.usage_flusher&.call)
 #   mcp_resolve_account -> the account for one call (principal#default_account /
 #                          principal#authorize_account(id))
-#   mcp_session_data    -> opaque payload bound to the session ({}; a host binds
-#                          e.g. { token_id: principal.id } so a revoked token kills
-#                          the session)
+#   mcp_session_data    -> opaque payload bound to the session (config.session_data_builder,
+#                          else {}; a host binds e.g. { token_id: principal.id } so a
+#                          revoked token kills the session)
 #   mcp_dispatch        -> run one JSON-RPC call (Dispatcher + Authority::Context)
 #   mcp_health_payload  -> the GET /mcp/health body
 #
@@ -205,11 +205,16 @@ module McpToolkit::Authority::ControllerMethods
     raise McpToolkit::Protocol::InvalidParams, "account_id #{candidate.inspect} is not authorized for this token"
   end
 
-  # Opaque payload bound to the session on `initialize`. Default: none. A host
-  # binds e.g. `{ token_id: mcp_principal.id }` so a revoked token can kill an
-  # in-flight session.
+  # Opaque payload bound to the session on `initialize`. Default: driven by
+  # `config.session_data_builder` (a host binds e.g. `{ token_id: principal.id }`
+  # so a revoked token can kill an in-flight session), or an empty payload when no
+  # builder is set. A host whose session payload needs controller state overrides
+  # this method instead.
   def mcp_session_data
-    {}
+    builder = mcp_config.session_data_builder
+    return {} if builder.nil?
+
+    builder.call(principal: mcp_principal) || {}
   end
 
   # Run one JSON-RPC call through the hand-rolled dispatcher with a fresh

@@ -77,6 +77,20 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
       expect(controller.send(:mcp_session_data)).to eq({})
     end
 
+    it "mcp_session_data delegates to config.session_data_builder with the principal" do
+      authenticate_as(principal)
+      McpToolkit.config.session_data_builder = ->(principal:) { { token_id: principal.id } }
+
+      expect(controller.send(:mcp_session_data)).to eq(token_id: 55)
+    end
+
+    it "mcp_session_data falls back to {} when the builder returns nil" do
+      authenticate_as(principal)
+      McpToolkit.config.session_data_builder = ->(**) {}
+
+      expect(controller.send(:mcp_session_data)).to eq({})
+    end
+
     it "mcp_rate_limit! delegates to config.rate_limiter with controller + principal" do
       authenticate_as(principal)
       seen = nil

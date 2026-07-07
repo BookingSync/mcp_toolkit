@@ -259,6 +259,15 @@ class McpToolkit::Configuration
   # @return [#call, nil]
   attr_accessor :usage_flusher
 
+  # Builds the opaque payload bound to a session on `initialize`. `->(principal:)`
+  # returning a Hash (or nil for none). Lets a host bind e.g.
+  # `{ token_id: principal.id }` so a revoked token can kill an in-flight session,
+  # WITHOUT overriding the controller's `mcp_session_data`. nil (the default) =>
+  # an empty session payload.
+  #
+  # @return [#call, nil]
+  attr_accessor :session_data_builder
+
   # The host's tool catalog — the api-agnostic seam. Duck-typed; the dispatcher
   # calls:
   #
@@ -346,6 +355,7 @@ class McpToolkit::Configuration
     @rate_limiter = nil
     @usage_recorder = nil
     @usage_flusher = nil
+    @session_data_builder = nil
     @tool_provider = nil
     @rate_limit_max_requests = nil # nil = rate limiting disabled
     @rate_limit_window = 3600 # 1 hour

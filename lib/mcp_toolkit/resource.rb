@@ -26,6 +26,10 @@ class McpToolkit::Resource
   # resource_schema so a client can discover the filter.
   CustomFilter = Struct.new(:name, :type, :description, :applier, keyword_init: true)
 
+  # Sentinel distinguishing `extra(:key)` (read) from `extra(:key, nil)` (write nil).
+  UNSET = Object.new
+  private_constant :UNSET
+
   attr_reader :name
 
   def initialize(name)
@@ -40,7 +44,25 @@ class McpToolkit::Resource
     @filterable_source = nil
     @custom_filters = {}
     @required_permissions_scope = nil
+    @extras = {}
   end
+
+  # A generic, api-agnostic metadata bag for host-defined "extras" — declarations
+  # the gem does not model itself (e.g. an app's ORM dependency list used to build a
+  # serializer). It is the storage behind `config.registry.resource_extension` (the
+  # host DSL that writes extras inside a registration block) and
+  # `config.registry.resource_finalizer` (which reads them back to derive gem-native
+  # fields such as `serializer` / `filterable`). Write with `extra(:key, value)`;
+  # read with `extra(:key)` (nil when unset). The gem never inspects the values.
+  def extra(key, value = UNSET)
+    return @extras[key] if value.equal?(UNSET)
+
+    @extras[key] = value
+  end
+
+  # The full host-extras bag (symbol/whatever key => value). Read-only view for a
+  # resource_finalizer that wants to iterate every declared extra.
+  attr_reader :extras
 
   def model(klass = nil)
     @model = klass if klass
