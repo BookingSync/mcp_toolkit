@@ -130,6 +130,27 @@ RSpec.describe McpToolkit::Gateway::Aggregator do
       end
     end
 
+    context "when the upstream is caller-dependent (public_tool_list: false)" do
+      before do
+        McpToolkit.config.upstreams.reset!
+        McpToolkit.config.register_upstream(key: "notifications", url: "https://notif.test/mcp", public_tool_list: false)
+      end
+
+      it "pulls live on every call instead of sharing a cache entry across callers" do
+        aggregator.tool_definitions
+        aggregator.tool_definitions
+
+        expect(client).to have_received(:tools_list).twice
+      end
+
+      it "never writes the list to the shared cache" do
+        aggregator.tool_definitions
+
+        cached = McpToolkit.config.cache_store.read("#{described_class::CACHE_KEY_PREFIX}notifications")
+        expect(cached).to be_nil
+      end
+    end
+
     context "across multiple upstreams" do
       it "aggregates all upstreams' tools in registry order" do
         McpToolkit.config.register_upstream(key: "billing", url: "https://billing.test/mcp")

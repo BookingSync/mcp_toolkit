@@ -125,6 +125,24 @@
   whole MCP initializer can live in `to_prepare`. `TokensController#introspect`
   behavior is preserved exactly.
 
+### Fixed
+
+- **Authority boundary returns JSON-RPC errors for bad input, not a 500** — a
+  malformed JSON body now maps to a JSON-RPC parse error (`-32700`) via a
+  `respond_to?`-guarded `rescue_from` (fires even from the session before_action),
+  and a non-object request or batch element maps to `invalid_request` instead of
+  raising a `NoMethodError` in the per-call loop.
+- **`initialize` advertises `instructions`** — the authority dispatcher now
+  includes `config.server_instructions` in the `initialize` result when set
+  (omitted when nil), matching the SDK-backed satellite server and the documented
+  contract.
+- **Gateway tool-list cache is contract-enforced, not assumption-based** — the
+  per-upstream list cache is keyed by upstream only, which is safe only when every
+  upstream's `tools/list` is caller-independent. That is now an explicit
+  registration contract: an upstream that filters its list by caller privilege
+  registers `public_tool_list: false` and is pulled live per request (never
+  cached), so a privileged caller's list can't leak to an unprivileged one.
+
 ### Removed
 
 - The engine's `app/controllers/mcp_toolkit/{server_controller,tokens_controller}.rb`
@@ -136,10 +154,11 @@
   (upstream URLs, account-selector meta key, logger, timeouts) are injected via
   `McpToolkit::Configuration`; nothing in the layer names a deployment.
   - `McpToolkit::Gateway::UpstreamRegistry` — a PER-CONFIG registry of upstream
-    servers (`Upstream = Data.define(:key, :url)` with `#name_for`), exposed as
-    `config.upstreams` and reset with a fresh config (test isolation for free).
-    API: `#register(key:, url:)` (blank url ignored), `#reset!`, `#all`, `#find`,
-    `#split_tool_name`. Config sugar: `config.register_upstream(key:, url:)`.
+    servers (`Upstream = Data.define(:key, :url, :public_tool_list)` with
+    `#name_for`), exposed as `config.upstreams` and reset with a fresh config (test
+    isolation for free). API: `#register(key:, url:, public_tool_list: true)` (blank
+    url ignored), `#reset!`, `#all`, `#find`, `#split_tool_name`. Config sugar:
+    `config.register_upstream(key:, url:, public_tool_list: true)`.
   - `McpToolkit::Gateway::Client` — a minimal Streamable-HTTP MCP client
     (`#tools_list`, `#tools_call`) with single-shot session-loss recovery (HTTP
     404 / JSON-RPC `-32001`), SSE `data:` unwrapping, and content negotiation. Its

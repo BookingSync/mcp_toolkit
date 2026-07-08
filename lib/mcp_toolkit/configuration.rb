@@ -363,11 +363,13 @@ class McpToolkit::Configuration
   end
 
   # Config sugar: register a gateway upstream. Delegates to `upstreams.register`,
-  # so a blank url is ignored (an unconfigured upstream is simply absent).
+  # so a blank url is ignored (an unconfigured upstream is simply absent). Pass
+  # `public_tool_list: false` for an upstream whose tool list varies by caller
+  # privilege, to opt it out of the shared list cache.
   #
   #   c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
-  def register_upstream(key:, url:)
-    upstreams.register(key:, url:)
+  def register_upstream(key:, url:, public_tool_list: true)
+    upstreams.register(key:, url:, public_tool_list:)
   end
 
   # The gateway handshake client name, defaulting to the server identity when the

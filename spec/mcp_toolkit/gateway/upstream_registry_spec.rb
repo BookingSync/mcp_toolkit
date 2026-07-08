@@ -15,6 +15,18 @@ RSpec.describe McpToolkit::Gateway::UpstreamRegistry do
       expect(registry.all).to eq([upstream])
     end
 
+    it "defaults public_tool_list to true (upstream opts into the shared list cache)" do
+      registry.register(key: "notifications", url: "http://notifications.test/mcp")
+
+      expect(registry.find("notifications").public_tool_list).to be(true)
+    end
+
+    it "registers a caller-dependent upstream with public_tool_list: false" do
+      registry.register(key: "gateway", url: "http://gateway.test/mcp", public_tool_list: false)
+
+      expect(registry.find("gateway").public_tool_list).to be(false)
+    end
+
     it "normalizes a symbol key to a string" do
       registry.register(key: :notifications, url: "http://notifications.test/mcp")
 

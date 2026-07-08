@@ -20,7 +20,19 @@ class McpToolkit::Gateway::UpstreamRegistry
   # separator.
   NAMESPACE_SEPARATOR = "__"
 
-  Upstream = Data.define(:key, :url) do
+  # `public_tool_list` is the gateway-cache contract: an upstream's `tools/list`
+  # MUST be caller-INDEPENDENT (the same public tools for every valid token; scope
+  # is enforced only when a tool is CALLED). That invariant is what lets the
+  # Aggregator share one cache entry per upstream across all callers. An upstream
+  # that filters its list by the caller's privilege (e.g. hides superuser-only
+  # tools) breaks it and MUST register `public_tool_list: false`, which opts it out
+  # of the shared cache so a privileged caller's list can't leak to an
+  # unprivileged one. Default true — the overwhelming common case.
+  Upstream = Data.define(:key, :url, :public_tool_list) do
+    def initialize(key:, url:, public_tool_list: true)
+      super
+    end
+
     def name_for(tool_name)
       "#{key}#{NAMESPACE_SEPARATOR}#{tool_name}"
     end
@@ -31,11 +43,13 @@ class McpToolkit::Gateway::UpstreamRegistry
   end
 
   # Registers an upstream by key. A blank url is ignored, so callers can pass an
-  # ENV lookup directly without guarding it.
-  def register(key:, url:)
+  # ENV lookup directly without guarding it. Pass `public_tool_list: false` for an
+  # upstream whose tool list varies by caller privilege, opting it out of the
+  # shared list cache (see the Upstream contract above).
+  def register(key:, url:, public_tool_list: true)
     return if url.blank?
 
-    @registered[key.to_s] = Upstream.new(key: key.to_s, url:)
+    @registered[key.to_s] = Upstream.new(key: key.to_s, url:, public_tool_list:)
   end
 
   # Clears every registered upstream.

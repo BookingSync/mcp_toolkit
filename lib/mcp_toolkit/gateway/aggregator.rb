@@ -14,6 +14,11 @@ require "concurrent"
 # token-INDEPENDENT — it returns the same public tool definitions to every valid
 # caller and enforces scope only when a tool is CALLED (per-call authorization is
 # the upstream's job). So one caller's pull is a correct answer for all callers.
+# This is a registration CONTRACT, not an assumption: an upstream that filters its
+# list by the caller's privilege (e.g. hides superuser-only tools) MUST register
+# `public_tool_list: false`, which opts it out of this cache (pulled live per
+# request) so a privileged caller's list can never be served to an unprivileged
+# one. See McpToolkit::Gateway::UpstreamRegistry::Upstream.
 #
 # Only a NON-EMPTY pull is ever cached. An empty or failed pull is almost always a
 # transient upstream hiccup (timeout, a session/handshake blip, a degenerate 200);
@@ -74,6 +79,10 @@ class McpToolkit::Gateway::Aggregator
   end
 
   def cached_or_live_definitions(upstream, bearer_token:)
+    # A caller-dependent upstream opts out of the shared cache (keyed by upstream
+    # only): caching it would leak one caller's list to callers of other privilege.
+    return live_definitions(upstream, bearer_token:) unless upstream.public_tool_list
+
     cached = cache.read(cache_key(upstream.key))
     # `present?` treats both a nil miss AND a stale empty list as "no cache", so a
     # previously poisoned empty entry is re-pulled instead of served.

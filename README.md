@@ -271,7 +271,7 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `parent_controller` | `"ActionController::Base"` | superclass of the engine's controllers, read lazily (set to `"ActionController::API"` for the authority, or `"ApplicationController"` for `helper_method` compat) |
 | `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
 | `account_id_header` | `"X-MCP-Account-ID"` | header fallback for the account selector |
-| `upstreams` | empty registry | gateway: registered upstream MCP servers (register via `register_upstream`) |
+| `upstreams` | empty registry | gateway: registered upstream MCP servers (register via `register_upstream`; pass `public_tool_list: false` for a caller-dependent list to opt out of the shared cache) |
 | `upstream_timeout` | `10` | gateway: HTTP timeout (s) for calls to an upstream |
 | `upstream_list_ttl` | `900` | gateway: TTL (s) for an upstream's cached tool list |
 | `logger` | `nil` | optional logger for gateway/session diagnostics (`Rails.logger`) |
@@ -348,6 +348,17 @@ end
 concurrently. Each upstream's list is cached (`config.upstream_list_ttl`, default
 15 min); only a **non-empty** pull is cached, and a failing upstream is omitted
 (and logged via `config.logger`) rather than breaking the whole list.
+
+The cache is keyed by upstream only, so it rests on a registration **contract**:
+an upstream's `tools/list` must be **caller-independent** (the same public tools
+for every valid token; scope enforced only at call time). An upstream that
+filters its list by the caller's privilege (e.g. hides superuser-only tools) must
+register `public_tool_list: false` — it is then pulled live per request and never
+cached, so a privileged caller's list can't leak to an unprivileged one.
+
+```ruby
+c.register_upstream(key: "gateway", url: ENV["GATEWAY_SERVER_URL"], public_tool_list: false)
+```
 
 ```ruby
 definitions = McpToolkit::Gateway::Aggregator.new.tool_definitions(bearer_token: token)
