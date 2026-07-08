@@ -235,6 +235,57 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         expect(rel.ordered_by).to eq(:created_at)
       end
     end
+
+    describe "custom filters (the Resource#filter seam)" do
+      before do
+        serializer = widget_serializer
+        model = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:custom_widgets) do
+            model model
+            serializer serializer
+            description "Widgets with a relational custom filter."
+            filterable price: :price
+            # A custom filter keyed OUTSIDE the equality allowlist: it applies an
+            # arbitrary block to the scoped relation, reading a TOP-LEVEL request param.
+            filter :for_booking, type: :integer, description: "Only widgets for this booking" do |relation, value|
+              relation.where(booking_id: value)
+            end
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      subject(:custom_resource) { McpToolkit.registry.fetch("custom_widgets") }
+
+      it "applies the custom-filter block for a matching TOP-LEVEL request key" do
+        result = described_class.call(resource: custom_resource, scope_root: account, params: { for_booking: 10 })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1, 3])
+      end
+
+      it "is a no-op when the custom-filter key is absent or blank" do
+        result = described_class.call(resource: custom_resource, scope_root: account, params: { for_booking: "" })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
+      end
+
+      it "runs BEFORE and composes with the allowlist equality filters" do
+        result = described_class.call(
+          resource: custom_resource, scope_root: account,
+          params: { for_booking: 10, filter: { price: { op: "gteq", value: 300 } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([3])
+      end
+
+      it "does NOT expose the custom key through the equality allowlist" do
+        expect do
+          described_class.call(resource: custom_resource, scope_root: account, params: { filter: { for_booking: 10 } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /unknown filter attribute/)
+      end
+    end
   end
 
   describe McpToolkit::GetExecutor do
@@ -330,6 +381,46 @@ RSpec.describe "Registry + executors + serializer (data path)" do
           { key: :price, column: :price, type: "integer", format: "integer" }
         ]
       )
+    end
+
+    it "advertises the per-attribute filter operators derived from the column type" do
+      schema = described_class.call(resource)
+
+      booking = schema[:attributes].find { |a| a[:name] == :booking_id }
+      name = schema[:attributes].find { |a| a[:name] == :name }
+      id = schema[:attributes].find { |a| a[:name] == :id }
+
+      expect(booking[:operators]).to eq(%w[eq not_eq gt gteq lt lteq])
+      expect(name[:operators]).to eq(%w[eq not_eq in matches does_not_match])
+      # A non-filterable attribute advertises an empty operator set.
+      expect(id[:operators]).to eq([])
+    end
+
+    it "passes through a nil note for a resource without one" do
+      expect(described_class.call(resource)).to include(note: nil)
+    end
+
+    context "with a resource note" do
+      before do
+        serializer = widget_serializer
+        model = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:noted_widgets) do
+            model model
+            serializer serializer
+            description "Noted widgets."
+            note "Internal debugging resource; do not interpret without domain knowledge."
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "passes the resource note through to the schema" do
+        schema = described_class.call(McpToolkit.registry.fetch("noted_widgets"))
+
+        expect(schema[:note]).to eq("Internal debugging resource; do not interpret without domain knowledge.")
+      end
     end
 
     # The DX gap this closes: a `scheduled_notifications.notification` link is

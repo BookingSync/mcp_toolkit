@@ -5,7 +5,7 @@
 # introspection request satellites send.
 #
 # Both are thin and config-driven: the actual token lookup is the app's
-# `config.token_authenticator` callable (its `McpToken.authenticate`
+# `config.token_authenticator` callable (its `AccessToken.authenticate`
 # equivalent), and the introspection payload is derived from the duck-typed
 # token object that callable returns.
 #
@@ -23,7 +23,7 @@
 #                       The sole authorization source on the satellite side.
 #
 # Optionally `#touch_last_used!` (called after a successful authenticate if
-# present). A typical app token model (e.g. `McpToken`) satisfies this.
+# present). A typical app token model (e.g. `AccessToken`) satisfies this.
 module McpToolkit::Auth::Authority
   # Authenticate a plaintext bearer locally. Returns the token object or nil.
   # Calls `touch_last_used!` on the token if it responds to it (throttled

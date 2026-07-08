@@ -144,8 +144,8 @@ class McpToolkit::Serializer::Base
 
   # Infer the serialized model from the serializer class name by stripping a
   # trailing "Serializer" and the host namespace, e.g.
-  #   Mcp::NotificationSerializer            -> Notification
-  #   Mcp::PushNotifications::FilterSerializer -> PushNotifications::Filter
+  #   Api::WidgetSerializer                 -> Widget
+  #   Api::ScheduledWidgets::FilterSerializer -> ScheduledWidgets::Filter
   # Subclasses whose name doesn't follow the convention set `model_class`.
   def self.model_class
     @model_class ||= begin

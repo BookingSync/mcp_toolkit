@@ -13,7 +13,32 @@ class McpToolkit::Registry
   def initialize
     @resources = {}
     @default_required_permissions_scope = nil
+    @resource_extension = nil
+    @resource_finalizer = nil
   end
+
+  # A Module MIXED INTO every Resource before its registration block runs, so a host
+  # can add its OWN declaration DSL (its "extras") on top of the gem's built-in
+  # `model` / `scope` / `serializer` / `filterable` / `superusers_only!` / `note` /
+  # `filter`. The host method typically stores into the generic `Resource#extra`
+  # bag; the `resource_finalizer` reads it back. nil (the default) mixes in nothing,
+  # so a host with no extras is unaffected. Set ONCE in `configure` (not per reload),
+  # since `reset!` preserves it.
+  #
+  #   McpToolkit.registry.resource_extension = MyApp::ResourceExtension  # adds `dependencies`
+  #
+  # @return [Module, nil]
+  attr_accessor :resource_extension
+
+  # A callable run against each Resource AFTER its registration block, so a host can
+  # derive gem-native fields from its declared extras — e.g. build a `serializer`
+  # from the `model` + declared `dependencies`, or a lazy `filterable`. `->(resource)`.
+  # nil (the default) is a no-op. This is the hook that lets a host avoid a parallel
+  # registration system: it declares resources DIRECTLY against the gem registry and
+  # fills the derived pieces here. Set ONCE in `configure`; preserved across `reset!`.
+  #
+  # @return [#call, nil]
+  attr_accessor :resource_finalizer
 
   # Registry-wide DEFAULT required scope, so a satellite declares its scope ONCE
   # for every resource instead of repeating it per resource:
@@ -32,7 +57,9 @@ class McpToolkit::Registry
 
   def register(name, &)
     resource = McpToolkit::Resource.new(name)
+    resource.extend(@resource_extension) if @resource_extension
     resource.instance_eval(&)
+    @resource_finalizer&.call(resource)
     @resources[name.to_s] = resource
   end
 
@@ -59,8 +86,9 @@ class McpToolkit::Registry
   end
 
   # Clears registered resources for a dev reload (the satellite re-declares them
-  # in `to_prepare`). The `default_required_permissions_scope` is PRESERVED, since
-  # it's declared once in `configure` rather than per-reload.
+  # in `to_prepare`). The `default_required_permissions_scope`, `resource_extension`
+  # and `resource_finalizer` are PRESERVED, since they're declared once in
+  # `configure` rather than per-reload.
   def reset!
     @resources = {}
   end

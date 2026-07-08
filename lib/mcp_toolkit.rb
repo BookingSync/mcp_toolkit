@@ -15,9 +15,12 @@ require "zeitwerk"
 #   active_support/concern - Transport::ControllerMethods is an includable concern
 #   active_support/cache   - the default MemoryStore cache_store
 #
-# `faraday` is the one exception: it is required alongside its sole owner,
-# Auth::AuthorityServerClient, which is the only object that builds an HTTP
-# connection.
+# Two third-party libs are the exception to the centralize-here rule: each is
+# required alongside its owner file rather than up front.
+#   faraday    - the HTTP client, required by the objects that build a connection
+#                (Auth::AuthorityServerClient and Gateway::Client).
+#   concurrent - concurrent-ruby's futures, required by its sole owner
+#                Gateway::Aggregator (which pulls upstreams in parallel).
 require "json"
 require "digest"
 require "time"
@@ -63,7 +66,17 @@ loader.ignore("#{__dir__}/mcp_toolkit/version.rb")
 # under `app/controllers` (outside this lib-rooted loader), so it needs no ignore;
 # it is loaded by Rails' autoloader via the engine when mounted.
 loader.ignore("#{__dir__}/mcp_toolkit/engine.rb")
+# `engine_controllers.rb` reopens `McpToolkit` to add the lazy `parent_controller`
+# builder + `const_missing` (it defines module methods, not a file-named
+# constant), so it is required explicitly below rather than autoloaded.
+loader.ignore("#{__dir__}/mcp_toolkit/engine_controllers.rb")
 loader.setup
+
+# The lazy `parent_controller` builder (McpToolkit.build_engine_controllers! /
+# reset_engine_controllers! / const_missing). Required unconditionally (it names no
+# Rails constant at load time); it only builds controllers when one is referenced,
+# which happens only under Rails.
+require_relative "mcp_toolkit/engine_controllers"
 
 # The toolkit for building account-scoped, read-only MCP servers on top of the
 # official `mcp` gem. See README.md for the satellite + authority quickstarts.

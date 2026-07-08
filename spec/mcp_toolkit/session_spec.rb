@@ -51,4 +51,34 @@ RSpec.describe McpToolkit::Session do
       expect(described_class.delete(nil)).to be(false)
     end
   end
+
+  describe "opaque data payload" do
+    it "defaults #data to {} when none is supplied on create" do
+      expect(described_class.create!.data).to eq({})
+    end
+
+    it "round-trips an opaque data payload through create -> find" do
+      created = described_class.create!(data: { token_id: 99 })
+
+      expect(created.data).to eq(token_id: 99)
+      expect(described_class.find(created.id).data).to eq(token_id: 99)
+    end
+
+    it "defaults #data to {} for a legacy row written without the payload" do
+      # Simulate a pre-`data` cache row: only created_at, no :data key.
+      id = SecureRandom.uuid
+      McpToolkit.config.cache_store.write(
+        "#{described_class::CACHE_KEY_PREFIX}#{id}", { created_at: Time.now.to_i }
+      )
+
+      expect(described_class.find(id).data).to eq({})
+    end
+
+    it "preserves the data payload across the sliding-TTL rewrite on find" do
+      created = described_class.create!(data: { token_id: 7 })
+
+      described_class.find(created.id) # slides TTL, rewrites the row
+      expect(described_class.find(created.id).data).to eq(token_id: 7)
+    end
+  end
 end

@@ -38,6 +38,7 @@ class McpToolkit::ResourceSchema
     {
       name: resource.name,
       description: resource.description,
+      note: resource.note,
       attributes:,
       relationships:,
       standard_filters: STANDARD_FILTERS,
@@ -59,8 +60,20 @@ class McpToolkit::ResourceSchema
       name:,
       type: type ? type.to_s : COMPUTED_TYPE,
       format: type ? TYPE_FORMATS[type] : nil,
-      filterable: filterable_column_for(name).present?
+      filterable: filterable_column_for(name).present?,
+      operators: operators_for(name)
     }.compact
+  end
+
+  # The filter operators an attribute accepts, derived from the backing column's
+  # type via McpToolkit::Filtering::OPERATORS_BY_TYPE. `[]` for a non-filterable
+  # attribute (or one whose column type has no operator set) — self-describing so
+  # a client knows exactly which `{ op:, value: }` conditions `list` will accept.
+  def operators_for(attribute_name)
+    pair = filterable_column_for(attribute_name)
+    return [] unless pair
+
+    McpToolkit::Filtering::OPERATORS_BY_TYPE.fetch(column_type(pair.last), [])
   end
 
   # Per-attribute equality filters this resource accepts on the `list` tool's

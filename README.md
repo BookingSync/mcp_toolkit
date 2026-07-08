@@ -61,8 +61,8 @@ introspects each forwarded bearer token against the central app.
 
 ```ruby
 McpToolkit.configure do |c|
-  c.server_name          = "bsa-notifications-mcp"
-  c.server_instructions  = "Read-only access to this account's notifications domain."
+  c.server_name          = "acme-mcp"
+  c.server_instructions  = "Read-only access to this account's widgets domain."
 
   # --- satellite auth ---
   c.auth_role            = :satellite
@@ -72,7 +72,7 @@ McpToolkit.configure do |c|
   # can override it per-resource (see below). Omit entirely for "no scope
   # required". Whether a scope is required is PER TOOL — there is no app-wide
   # permission flag.
-  c.registry.default_required_permissions_scope "notifications__read"
+  c.registry.default_required_permissions_scope "widgets__read"
 
   # Map the central account id to this app's LOCAL scope root (an Account here).
   c.account_resolver = ->(synced_account_id) { Account.find_by(synced_id: synced_account_id) }
@@ -94,22 +94,22 @@ the resolved scope root — this is the single tenancy chokepoint:
 Rails.application.config.to_prepare do
   McpToolkit.registry.reset!
 
-  McpToolkit.registry.register(:notifications) do
-    model       Notification
-    serializer  Mcp::NotificationSerializer        # your serializer (see below)
-    description "Email notification templates + their scheduling rules."
-    scope(&:notifications)                          # account.notifications
+  McpToolkit.registry.register(:widgets) do
+    model       Widget
+    serializer  WidgetSerializer                    # your serializer (see below)
+    description "Widget templates + their scheduling rules."
+    scope(&:widgets)                                # account.widgets
   end
 
-  McpToolkit.registry.register(:scheduled_notifications) do
-    model       ScheduledNotification
-    serializer  Mcp::ScheduledNotificationSerializer
-    description "Scheduled mailings."
+  McpToolkit.registry.register(:scheduled_widgets) do
+    model       ScheduledWidget
+    serializer  ScheduledWidgetSerializer
+    description "Scheduled widget deliveries."
     # Expose a public filter key that maps to a synced storage column:
     filterable  booking_id: :synced_booking_id
     # Override the registry default scope for just this resource (optional):
-    required_permissions_scope "notifications__read"
-    scope { |account| ScheduledNotification.where(synced_account_id: account.synced_id) }
+    required_permissions_scope "widgets__read"
+    scope { |account| ScheduledWidget.where(synced_account_id: account.synced_id) }
   end
 end
 ```
@@ -141,12 +141,12 @@ introspecting the forwarded token and scoped to the resolved account.
 The authority authenticates plaintext tokens locally and answers the
 introspection requests satellites send.
 
-**1. Configure** the local token lookup (your `McpToken.authenticate` equivalent):
+**1. Configure** the local token lookup (your `AccessToken.authenticate` equivalent):
 
 ```ruby
 McpToolkit.configure do |c|
   c.auth_role          = :authority
-  c.token_authenticator = ->(plaintext) { McpToken.authenticate(plaintext) }
+  c.token_authenticator = ->(plaintext) { AccessToken.authenticate(plaintext) }
   c.cache_store        = Rails.cache
 end
 ```
@@ -155,12 +155,12 @@ The token object your authenticator returns must respond to:
 `kind` (`:accounts_user` | `:user`), `account_id`, `account_ids`, `expires_at`
 (an `#iso8601`-able time or nil), and `scopes` (an array of `<app>__<action>`
 scopes; `[]` = no scopes). Optionally `touch_last_used!`. A typical app token
-model (e.g. `McpToken`) fits.
+model (e.g. `AccessToken`) fits.
 
 **2. Expose the introspection endpoint** the satellites call:
 
 ```ruby
-class Mcp::TokensController < ActionController::API
+class TokensController < ActionController::API
   def introspect
     token = McpToolkit::Auth::Authority.authenticate(extract_token)
     return render(json: McpToolkit::Auth::Authority.invalid_payload, status: :unauthorized) unless token
@@ -181,7 +181,7 @@ end
 
 ```ruby
 # config/routes.rb
-post "mcp/tokens/introspect", to: "mcp/tokens#introspect"
+post "mcp/tokens/introspect", to: "tokens#introspect"
 ```
 
 The payload `introspection_payload` emits is exactly the contract the satellite's
@@ -226,13 +226,13 @@ end
 ### Using the bundled base
 
 ```ruby
-class Mcp::NotificationSerializer < McpToolkit::Serializer::Base
+class WidgetSerializer < McpToolkit::Serializer::Base
   attributes :id, :name, :active, :created_at, :updated_at
   translates :subject, :template_html         # Globalize-backed { locale => value }
 
   has_one  :account, foreign_key: :synced_account_id
-  has_one  :mail_layout
-  has_many :scheduled_notifications
+  has_one  :layout
+  has_many :scheduled_widgets
 end
 ```
 
@@ -249,6 +249,7 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | Setting | Default | Purpose |
 |---|---|---|
 | `server_name` / `server_version` / `server_instructions` | `"mcp-server"` / `"1.0.0"` / `nil` | advertised on `initialize` |
+| `gateway_client_name` / `gateway_client_version` | `server_name` / `server_version` | `clientInfo` a gateway presents to its upstreams (identity split) |
 | `serializer_base` | `McpToolkit::Serializer::Base` | the default base to subclass |
 | `auth_role` | `:satellite` | `:satellite` or `:authority` |
 | `central_app_url` | `nil` | satellite: base URL of the auth authority |
@@ -259,35 +260,315 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `token_authenticator` | `nil` | authority: `->(plaintext) { token_or_nil }` |
 | `cache_store` | `MemoryStore` | sessions + introspection cache (set to `Rails.cache`) |
 | `session_ttl` | `3600` | session sliding TTL (s) |
-| `protocol_version` | `nil` (negotiate) | pin an MCP protocol version |
-| `parent_controller` | `"ActionController::Base"` | superclass of the engine's `ServerController` (set to `"ApplicationController"` for `helper_method` compat) |
+| `protocol_version` | `nil` (negotiate) | pin an MCP protocol version (satellite/upstream client) |
+| `supported_protocol_versions` | `Protocol::SUPPORTED_VERSIONS` | version set the authority dispatcher negotiates |
+| `tool_provider` | `nil` | authority: the host's api-agnostic tool catalog (see below) |
+| `generic_tool_name_prefix` | `""` | authority: prefix namespacing the four generic Registry-backed tools (e.g. `"foo_"` → `foo_resources` …) |
+| `rate_limiter` / `usage_recorder` / `usage_flusher` | `nil` | authority transport billing hooks (config callables) |
+| `rate_limit_max_requests` | `nil` (off) | authority: per-principal request cap for the built-in `RateLimiter`; `nil` disables rate limiting |
+| `rate_limit_window` | `3600` | authority: fixed rate-limit window (s); ignored while `rate_limit_max_requests` is `nil` |
+| `superuser_resolver` | `nil` | optional `->(principal) -> Boolean` for `Context#superuser?`; `nil` = duck-type `principal.superuser?` |
+| `parent_controller` | `"ActionController::Base"` | superclass of the engine's controllers, read lazily (set to `"ActionController::API"` for the authority, or `"ApplicationController"` for `helper_method` compat) |
 | `account_meta_key` | `"mcp-toolkit/account-id"` | `_meta` key a superuser uses to pin the account |
 | `account_id_header` | `"X-MCP-Account-ID"` | header fallback for the account selector |
+| `upstreams` | empty registry | gateway: registered upstream MCP servers (register via `register_upstream`; pass `public_tool_list: false` for a caller-dependent list to opt out of the shared cache) |
+| `upstream_timeout` | `10` | gateway: HTTP timeout (s) for calls to an upstream |
+| `upstream_list_ttl` | `900` | gateway: TTL (s) for an upstream's cached tool list |
+| `logger` | `nil` | optional logger for gateway/session diagnostics (`Rails.logger`) |
 
 ## Public API surface
 
 - `McpToolkit.configure { |c| ... }`, `McpToolkit.config`, `McpToolkit.registry`,
   `McpToolkit.reset_config!`
 - `McpToolkit::Registry#register(name) { ... }` (DSL: `model`, `serializer`,
-  `scope`, `description`, `filterable`, `required_permissions_scope`) +
+  `scope`, `description`, `note`, `filterable`, `filter(name, type:, description:,
+  &applier)`, `superusers_only!`, `required_permissions_scope`) +
   `#default_required_permissions_scope`
 - `McpToolkit::Serializer::Base` (DSL: `attributes`, `has_one`, `has_many`,
   `translates`)
-- `McpToolkit::Server.build(server_context:, config:, extra_tools:)`
+- `McpToolkit::Server.build(server_context:, config:, extra_tools:)` (satellite,
+  SDK-backed)
 - `McpToolkit::Engine` (mountable; `mount McpToolkit::Engine => "/mcp"`) +
-  `McpToolkit::ServerController` (its controller; parent via `parent_controller`)
-- `McpToolkit::Transport::ControllerMethods` (standalone controller concern;
-  override `mcp_config` / `mcp_extra_tools`)
-- `McpToolkit::Session`
+  `McpToolkit::ServerController` (its controller; parent via `parent_controller`,
+  built lazily)
+- `McpToolkit::Transport::ControllerMethods` (standalone satellite controller
+  concern; override `mcp_config` / `mcp_extra_tools`)
+- **Authority dispatch path** (a first-party server serving its own tools +
+  upstreams, no SDK): `McpToolkit::Protocol`,
+  `McpToolkit::Dispatcher.new(context:, config:)#handle_request`,
+  `McpToolkit::Authority::ControllerMethods` (the transport concern, all
+  billing/tenancy steps overridable hooks),
+  `McpToolkit::Authority::ServerController` (subclassable base),
+  `McpToolkit::Authority::Context` (`account` / `principal` / `bearer_token` /
+  `superuser?`), `McpToolkit::Tools::AuthorityBase` (optional tool base),
+  `config.tool_provider` (the api-agnostic tool seam),
+  `McpToolkit::Authority::RegistryToolProvider.new(config:)` (serves the four
+  generic Registry-backed tools `resources` / `resource_schema` / `get` / `list`,
+  reusing the executors + schema builder) +
+  `McpToolkit::Authority::CompositeToolProvider.new(*providers)` (compose it with
+  bespoke tools)
+- `McpToolkit::Session` (opaque `#data` payload, e.g. to bind a session to a token id)
 - `McpToolkit::Auth::Introspection` / `Authenticator` (satellite),
   `McpToolkit::Auth::Authority` (authority)
 - `McpToolkit::Errors::{InvalidParams, Unauthorized, ConfigurationError}`
+- Gateway layer (a central app aggregating/proxying other MCP servers):
+  `McpToolkit::Gateway::UpstreamRegistry` (via `config.upstreams` /
+  `config.register_upstream`), `McpToolkit::Gateway::{Client, Aggregator, Proxy}`,
+  and its errors `McpToolkit::Gateway::{UnknownUpstream, UpstreamCallError}` +
+  `McpToolkit::Gateway::Client::Error`
+- `McpToolkit::TokensController` — the authority introspection endpoint drawn by
+  the engine at `POST /mcp/tokens/introspect`
 
-## Scope (what's intentionally NOT here)
+## Gateway / authority endpoint
 
-The gateway / upstream-aggregation layer (a central app's `Mcp::Upstreams*`) is
-**out of scope** — it's core-only and ships to no satellite. This toolkit is for
-servers that expose tools, not for aggregating other servers.
+Beyond exposing a single server's own tools, the toolkit also ships the generic
+**gateway** layer a central app uses to aggregate *other* MCP servers and proxy
+calls to them, plus the **authority** introspection endpoint satellites call.
+Every app-specific value (the upstream URLs, the account-selector meta key, the
+logger, timeouts) is injected via config — nothing here names a deployment.
+
+### Register upstreams
+
+Each upstream has a `key` (the tool-name namespace prefix — its tools surface as
+`<key>__<tool>`) and a `url` (its MCP HTTP endpoint). A blank url is ignored, so
+an ENV lookup can be passed directly:
+
+```ruby
+McpToolkit.configure do |c|
+  c.cache_store = Rails.cache          # share the upstream tool-list cache across workers
+  c.logger      = Rails.logger         # optional; degrade/recovery diagnostics
+  c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
+  c.register_upstream(key: "billing",       url: ENV["BILLING_SERVER_URL"])
+end
+```
+
+### Aggregate upstream tool lists
+
+`Aggregator#tool_definitions` returns every upstream's tools, namespaced, pulled
+concurrently. Each upstream's list is cached (`config.upstream_list_ttl`, default
+15 min); only a **non-empty** pull is cached, and a failing upstream is omitted
+(and logged via `config.logger`) rather than breaking the whole list.
+
+The cache is keyed by upstream only, so it rests on a registration **contract**:
+an upstream's `tools/list` must be **caller-independent** (the same public tools
+for every valid token; scope enforced only at call time). An upstream that
+filters its list by the caller's privilege (e.g. hides superuser-only tools) must
+register `public_tool_list: false` — it is then pulled live per request and never
+cached, so a privileged caller's list can't leak to an unprivileged one.
+
+```ruby
+c.register_upstream(key: "gateway", url: ENV["GATEWAY_SERVER_URL"], public_tool_list: false)
+```
+
+```ruby
+definitions = McpToolkit::Gateway::Aggregator.new.tool_definitions(bearer_token: token)
+# => [{ "name" => "notifications__list_items", "description" => ..., "inputSchema" => ... }, ...]
+
+McpToolkit::Gateway::Aggregator.new.flush!               # bust every upstream's cache
+McpToolkit::Gateway::Aggregator.new.flush!("notifications")  # or just one
+```
+
+### Proxy a namespaced call
+
+Split a namespaced tool name via the registry, then proxy it. The caller passes
+the already-resolved account id (a scalar); it is forwarded as
+`_meta[config.account_meta_key]`.
+
+```ruby
+key, bare = McpToolkit.config.upstreams.split_tool_name("notifications__list_items")
+proxy = McpToolkit::Gateway::Proxy.new(
+  app_key: key, tool_name: bare, account_id: current_account_id, bearer_token: token
+)
+result = proxy.call({ "since" => "2026-01-01" })   # the upstream's `result` hash, verbatim
+```
+
+The proxy is transport-agnostic: an unregistered key raises
+`McpToolkit::Gateway::UnknownUpstream`, and an upstream call failure raises
+`McpToolkit::Gateway::UpstreamCallError` (carrying the upstream's `jsonrpc_error`
+/ `http_status`). Your dispatcher maps those to whatever error shape its transport
+speaks — the gem never welds the gateway to a protocol-error class.
+
+### Authority introspection endpoint (built in)
+
+Mounting `McpToolkit::Engine` also draws `POST /mcp/tokens/introspect`, backed by
+the gem-provided `McpToolkit::TokensController`. A central app configured with a
+`token_authenticator` answers introspection with **no controller of its own** —
+the Quickstart 2 hand-rolled controller becomes optional:
+
+```ruby
+# config/routes.rb
+mount McpToolkit::Engine => "/mcp"   # POST /mcp/tokens/introspect now works
+```
+
+Drawing it is safe even on an app that is not an authority: with no
+`token_authenticator`, it simply answers `{ "valid": false }`.
+
+## Authority + gateway server (own tools + upstreams, no SDK)
+
+Beyond the SDK-backed satellite path, the toolkit also ships a **hand-rolled
+dispatch path** for a first-party server that authenticates tokens LOCALLY and
+serves its OWN tools — and, as a gateway, aggregates + proxies upstreams — with
+the official `mcp` SDK out of the request path. The gem carries the two dispatch
+front-ends side by side: `McpToolkit::Server.build` (satellite) and
+`McpToolkit::Dispatcher` (authority). The wire behavior of the authority path —
+top-level JSON-RPC tool-error codes, `initialize` capabilities, 3-version
+negotiation, verbatim upstream error relay, the custom `list_changed` cache-bust —
+is fixed, so a monetized endpoint keeps its byte contract.
+
+### 1. Expose your tools through a provider (the api-agnostic seam)
+
+The gem never sees your API layer. It serves your tools only through a duck-typed
+`tool_provider` you register:
+
+```ruby
+# provider.tool_definitions(context) -> [{ name:, description:, inputSchema: }]
+# provider.find(name)                -> a tool object, or nil
+#
+# a tool object responds to:
+#   #required_permissions_scope -> String | nil     (the gem's per-tool scope gate)
+#   #call(context:, **arguments) -> Hash | String   (wrapped into { content: [...] })
+McpToolkit.configure do |c|
+  c.tool_provider = MyToolProvider.new   # your glue over your own tool classes
+end
+```
+
+A tool MAY subclass the bundled base (or be any object satisfying the contract):
+
+```ruby
+class ListWidgets < McpToolkit::Tools::AuthorityBase
+  tool_name "list_widgets"
+  description "List widgets for the active account."
+  required_permissions_scope "widgets__read"      # gem gates this centrally
+  input_schema { { type: "object", properties: { limit: { type: "integer" } } } }
+
+  # `account` / `principal` / `bearer_token` / `superuser?` come from the context.
+  def call(limit: 25)
+    Widget.for(account).limit(limit).map(&:as_json)  # your domain, behind #call
+  end
+end
+```
+
+`context` is an `McpToolkit::Authority::Context` (`account`, `principal`,
+`bearer_token`, `superuser?`). It is re-created for EVERY JSON-RPC call — including
+each element of a batch — so a mixed-account batch resolves the right account per
+call.
+
+#### Or serve the generic Registry-backed tools
+
+If your tools are just account-scoped, read-only views over models, you don't need
+to hand-write them. Register each as a resource (exactly as on the satellite side)
+and let the bundled provider serve the same four generic tools — `resources`,
+`resource_schema`, `get`, `list` — over the authority dispatcher:
+
+```ruby
+McpToolkit.configure do |c|
+  c.registry.register(:widgets) do
+    model Widget
+    serializer WidgetSerializer                 # any class satisfying the serializer contract
+    description "Widgets for the active account."
+    filterable status: :status, owner_id: :owner_id
+    # A resource-specific ("custom") filter: an arbitrary block, keyed by a
+    # top-level request param, that the generic equality allowlist can't express.
+    filter :for_project, type: :integer, description: "Only widgets in this project" do |relation, id|
+      relation.joins(:board).where(boards: { project_id: id })
+    end
+    superusers_only!                            # optional: refuse/hide for non-superuser tokens
+    note "Read-only projection; do not interpret status codes without domain context."
+    scope { |account| Widget.where(account_id: account.id) }
+  end
+
+  # The generic tools, served over config.registry:
+  c.tool_provider = McpToolkit::Authority::RegistryToolProvider.new(config: c)
+end
+```
+
+Each generic tool resolves the `resource` argument against the registry, refuses a
+`superusers_only!` resource for a non-superuser (and hides it from `resources`),
+enforces the resource's `required_permissions_scope`, and requires a resolved
+account for `get` / `list`. `resource_schema` advertises each attribute's filter
+`operators` and the resource `note`.
+
+By default the four tools advertise their bare names (`resources`,
+`resource_schema`, `get`, `list`). To **namespace** them — e.g. to keep a stable,
+host-specific name for existing clients, or to run several MCP surfaces without
+name collisions — set a prefix:
+
+```ruby
+c.generic_tool_name_prefix = "foo_"   # advertised + resolved as foo_resources,
+                                      # foo_resource_schema, foo_get, foo_list
+```
+
+The prefix applies only to these four generic tools; a composed bespoke provider's
+own tool names are unaffected.
+
+To serve the generic tools **and** your own bespoke tools behind one provider,
+compose them:
+
+```ruby
+c.tool_provider = McpToolkit::Authority::CompositeToolProvider.new(
+  McpToolkit::Authority::RegistryToolProvider.new(config: c),
+  MyBespokeToolProvider.new                    # e.g. an audit/versions tool
+)
+```
+
+### 2. Serve it through the authority transport
+
+A **pure host** mounts the engine's authority base and drives everything from
+config callables. A host whose rate-limit / usage / account logic touches its own
+models **subclasses** the base and overrides the hook methods:
+
+```ruby
+class ServerController < McpToolkit::Authority::ServerController
+  # Local token auth, session binding, and account resolution have working
+  # defaults (duck-typed on your token via config.token_authenticator). Override
+  # only what touches your models:
+  def mcp_rate_limit!
+    # ...your limiter; render + halt when over the limit...
+  end
+
+  def mcp_track_usage(request_data, account)
+    # ...accumulate one usage row for this call (fires per batch element)...
+  end
+
+  def mcp_flush_usage        = # ...bulk-insert the accumulated rows...
+  def mcp_session_data       = { token_id: mcp_principal.id }  # revoked token kills the session
+end
+```
+
+Every billing/tenancy step is an overridable hook: `mcp_authenticate!`,
+`mcp_rate_limit!`, `mcp_track_usage`, `mcp_flush_usage`, `mcp_resolve_account`,
+`mcp_session_data`, `mcp_dispatch`, `mcp_health_payload`, `mcp_config`. The
+per-request loop (`resolve account → track usage → dispatch`) is preserved across
+batches, so usage metering survives a mixed-account batch.
+
+**Rate limiting is built in.** Set `config.rate_limit_max_requests` (and,
+optionally, `config.rate_limit_window`, default 1 hour) and the default
+`mcp_rate_limit!` throttles each principal via `McpToolkit::RateLimiter` against
+`config.cache_store` — no subclass needed. It sets the `X-RateLimit-*` headers on
+every capped response and, over the limit, renders a JSON-RPC `-32029` error at
+`429` with `Retry-After`. A host that keeps its cap in a constant/model overrides
+the small `mcp_rate_limit_max_requests` hook (default `config.rate_limit_max_requests`);
+`mcp_rate_limit_key` (default `mcp_principal.id`) buckets the counter. Leaving the
+cap `nil` disables throttling entirely; `config.rate_limiter` stays as an escape
+hatch that replaces the built-in wholesale.
+
+**Superuser is an optional, first-class concept.** Set
+`config.superuser_resolver = ->(principal) { ... }` and `Context#superuser?` uses
+it to gate `superusers_only!` resources; with no resolver it duck-types
+`principal.superuser?`, and with neither, no caller is ever a superuser.
+
+Point your `POST /mcp` route at the subclass (or mount the engine for a pure host);
+keep `POST /mcp/tokens/introspect` on the gem's `TokensController`.
+
+### Lazy `parent_controller`
+
+The gem's controllers subclass `config.parent_controller`. That parent is read
+only at **build** time — the controllers are built by
+`McpToolkit.build_engine_controllers!`, triggered lazily on first reference and
+reset on each reload by the engine's `to_prepare` — so it is always resolved AFTER
+your app's initializers/to_prepare. Your whole MCP initializer can therefore live
+in `to_prepare`. Set `c.parent_controller = "ActionController::API"` for the
+authority.
 
 ## Development
 

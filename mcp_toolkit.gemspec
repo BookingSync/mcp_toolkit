@@ -49,6 +49,10 @@ Gem::Specification.new do |spec|
   # depend on it, not on full Rails, so non-Rails hosts can consume the gem.
   spec.add_dependency "activesupport", ">= 6.1"
   # faraday is the HTTP client the satellite uses to introspect tokens against
-  # the central app.
+  # the central app, and a gateway uses to reach its upstream MCP servers.
   spec.add_dependency "faraday", ">= 1.0"
+  # concurrent-ruby powers the gateway aggregator's parallel upstream pulls. It is
+  # already an activesupport transitive dependency; depended on directly here
+  # because the gem's own code (Gateway::Aggregator) requires it.
+  spec.add_dependency "concurrent-ruby", ">= 1.1"
 end

@@ -16,6 +16,20 @@
 class McpToolkit::Resource
   class NotConfigured < StandardError; end
 
+  # A resource-specific ("custom") filter: a request-facing key whose value is
+  # applied to the relation by an arbitrary host-supplied block, rather than the
+  # generic equality/operator allowlist. The block is api-agnostic — it receives
+  # the already-scoped relation and the raw request value and returns a narrowed
+  # relation — so a host can express a relational or otherwise non-column filter
+  # (e.g. "only rows whose associated booking is in this rental") without the gem
+  # knowing anything about the query. `type`/`description` are surfaced by
+  # resource_schema so a client can discover the filter.
+  CustomFilter = Struct.new(:name, :type, :description, :applier, keyword_init: true)
+
+  # Sentinel distinguishing `extra(:key)` (read) from `extra(:key, nil)` (write nil).
+  UNSET = Object.new
+  private_constant :UNSET
+
   attr_reader :name
 
   def initialize(name)
@@ -24,9 +38,31 @@ class McpToolkit::Resource
     @serializer = nil
     @scope_block = nil
     @description = nil
+    @note = nil
+    @superusers_only = false
     @filterable = {}
+    @filterable_source = nil
+    @custom_filters = {}
     @required_permissions_scope = nil
+    @extras = {}
   end
+
+  # A generic, api-agnostic metadata bag for host-defined "extras" — declarations
+  # the gem does not model itself (e.g. an app's ORM dependency list used to build a
+  # serializer). It is the storage behind `config.registry.resource_extension` (the
+  # host DSL that writes extras inside a registration block) and
+  # `config.registry.resource_finalizer` (which reads them back to derive gem-native
+  # fields such as `serializer` / `filterable`). Write with `extra(:key, value)`;
+  # read with `extra(:key)` (nil when unset). The gem never inspects the values.
+  def extra(key, value = UNSET)
+    return @extras[key] if value.equal?(UNSET)
+
+    @extras[key] = value
+  end
+
+  # The full host-extras bag (symbol/whatever key => value). Read-only view for a
+  # resource_finalizer that wants to iterate every declared extra.
+  attr_reader :extras
 
   def model(klass = nil)
     @model = klass if klass
@@ -47,6 +83,59 @@ class McpToolkit::Resource
     @description = text if text
     @description
   end
+
+  # Free-form usage caveat surfaced by the `resources` / `resource_schema` tools,
+  # e.g. to flag a resource as internal-debugging-only and not to be interpreted
+  # without domain knowledge. Read with no arg. api-agnostic passthrough string.
+  def note(text = nil)
+    @note = text if text
+    @note
+  end
+
+  # Restricts this resource to superuser (cross-tenant) callers on the AUTHORITY
+  # path: an authority tool refuses `get` / `list` / `resource_schema` for a
+  # non-superuser and HIDES the resource from `resources` discovery. Declared in a
+  # resource's registration block:
+  #
+  #   McpToolkit.registry.register(:audit_events) do
+  #     superusers_only!
+  #     ...
+  #   end
+  #
+  # Generic and api-agnostic — the gem never names an app concept; the caller's
+  # superuser-ness is derived by the Authority::Context off the principal.
+  def superusers_only!
+    @superusers_only = true
+  end
+
+  # Whether this resource is restricted to superuser callers (default false).
+  def superusers_only?
+    @superusers_only
+  end
+
+  # Declares a resource-specific ("custom") filter: a request-facing `name` whose
+  # value is applied to the already-scoped relation by the given block. Unlike the
+  # `filterable` allowlist (generic equality/operator filters on a declared
+  # column), a custom filter runs ARBITRARY host logic, so a host can express a
+  # relational filter the gem could not derive:
+  #
+  #   filter :rental_id, type: :integer, description: "Only rows for this rental" do |relation, value|
+  #     relation.joins(:booking).where(bookings: { rental_id: value })
+  #   end
+  #
+  # The block receives `(relation, value)` and MUST return a relation (narrowing
+  # only). `type` / `description` are metadata surfaced by `resource_schema`. The
+  # value arrives from a TOP-LEVEL request param keyed by `name` (see ListExecutor),
+  # applied BEFORE the allowlist `filterable` filters. api-agnostic: the gem stores
+  # and calls the block without inspecting it.
+  def filter(name, type:, description:, &applier)
+    @custom_filters[name.to_sym] = CustomFilter.new(name: name.to_sym, type:, description:, applier:)
+  end
+
+  # Request-facing custom-filter key (symbol) => CustomFilter. Consumed by the list
+  # executor (which applies each block whose key is present in the request params)
+  # and by resource_schema (which surfaces each filter's type/description).
+  attr_reader :custom_filters
 
   # The OAuth-style scope a token MUST carry to reach this resource via the
   # generic tools (e.g. "notifications__read"). Declared explicitly per resource:
@@ -80,24 +169,35 @@ class McpToolkit::Resource
   #
   # Unmapped/unknown keys are rejected by the list executor, never silently
   # dropped, so a typo surfaces as actionable feedback.
-  def filterable(mapping = nil)
-    return @filterable if mapping.nil?
+  # Accepts a Hash (merged now) OR a callable returning a Hash (resolved LAZILY on
+  # first read). The lazy form lets a host derive the map from something that must
+  # NOT be touched at registration/boot time — e.g. a DB-backed column list
+  # (`Model.column_names`): registration typically runs inside an initializer's
+  # `to_prepare`, before the database may exist (e.g. CI's `db:create`), so hitting
+  # the DB there aborts boot. A callable source is invoked at most once — on the
+  # first read (a tool call, when the DB is present) — then memoized.
+  def filterable(mapping = nil, &block)
+    source = block || mapping
+    return filterable_columns if source.nil?
 
-    mapping.each do |request_key, column|
-      @filterable[request_key.to_sym] = column.to_sym
+    if source.respond_to?(:call)
+      @filterable_source = source
+    else
+      merge_filterable!(source)
     end
-    @filterable
+    self
   end
 
   # Request-facing filter keys (symbols, sorted) this resource can be filtered
   # by. Surfaced via the `resource_schema` tool.
   def filterable_keys
-    @filterable.keys.sort
+    filterable_columns.keys.sort
   end
 
   # Request-facing filter key (symbol) => backing column (symbol). Consumed by
   # the list executor to build the WHERE clause.
   def filterable_columns
+    resolve_filterable_source!
     @filterable
   end
 
@@ -125,5 +225,23 @@ class McpToolkit::Resource
     return [] unless serializer.respond_to?(:declared_associations)
 
     serializer.declared_associations
+  end
+
+  private
+
+  # Resolves a lazily-provided filterable source (a callable) exactly once — on the
+  # first `filterable_columns` / `filterable_keys` read — then drops it, so later
+  # reads are pure Hash access. This is what keeps a DB-derived map (e.g.
+  # `Model.column_names`) out of registration/boot time.
+  def resolve_filterable_source!
+    return unless @filterable_source
+
+    source = @filterable_source
+    @filterable_source = nil
+    merge_filterable!(source.call || {})
+  end
+
+  def merge_filterable!(mapping)
+    mapping.each { |request_key, column| @filterable[request_key.to_sym] = column.to_sym }
   end
 end

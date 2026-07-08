@@ -2,6 +2,8 @@
 
 require "mcp_toolkit"
 require "webmock/rspec"
+# stdlib Logger, so gateway specs can `instance_double(Logger, ...)` a config.logger.
+require "logger"
 
 # Block all real HTTP; auth specs stub the central app's introspection endpoint.
 WebMock.disable_net_connect!

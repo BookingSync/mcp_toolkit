@@ -25,6 +25,24 @@ class McpToolkit::Configuration
   # @return [String, nil] human-readable `instructions` returned on `initialize`.
   attr_accessor :server_instructions
 
+  # --- gateway client identity (identity split) ------------------------------
+
+  # The `clientInfo` an app presents when it acts as a GATEWAY talking to its
+  # upstream MCP servers (McpToolkit::Gateway::Client's handshake). Split from the
+  # SERVER identity (`server_name`/`server_version`, advertised to the app's OWN
+  # callers) so an authority can present its real server identity downstream while
+  # keeping its upstream handshake byte-identical to a prior deployment. Both
+  # default to the server identity, so a satellite/gateway that doesn't care sets
+  # nothing.
+  #
+  #   c.server_name         = "acme-mcp"          # advertised to our callers
+  #   c.gateway_client_name = "acme-mcp-gateway"  # presented to our upstreams
+  #
+  # @return [String] gateway handshake client name (defaults to `server_name`).
+  attr_writer :gateway_client_name
+  # @return [String] gateway handshake client version (defaults to `server_version`).
+  attr_writer :gateway_client_version
+
   # --- serialization ---------------------------------------------------------
 
   # The DEFAULT serializer base class. A `Resource` registration that does not
@@ -81,10 +99,10 @@ class McpToolkit::Configuration
 
   # Looks up + verifies a plaintext bearer token locally, returning a token
   # object (duck-typed, see below) or nil. This is the authority's
-  # `McpToken.authenticate(plaintext)` equivalent. Required for the :authority
+  # `AccessToken.authenticate(plaintext)` equivalent. Required for the :authority
   # role; unused by a pure satellite.
   #
-  #   c.token_authenticator = ->(plaintext) { McpToken.authenticate(plaintext) }
+  #   c.token_authenticator = ->(plaintext) { AccessToken.authenticate(plaintext) }
   #
   # The returned token object must respond to the methods
   # `McpToolkit::Auth::Authority#introspection_payload` reads (see that module for
@@ -108,6 +126,39 @@ class McpToolkit::Configuration
   # @return [Integer] session sliding-TTL in seconds.
   attr_accessor :session_ttl
 
+  # --- rate limiting ---------------------------------------------------------
+
+  # The built-in per-principal request cap enforced by the authority transport
+  # (McpToolkit::Authority::ControllerMethods#mcp_rate_limit!), counted against
+  # `cache_store` via McpToolkit::RateLimiter. nil (the default) DISABLES rate
+  # limiting entirely, so a pure host is unaffected until it opts in. Set an
+  # Integer to cap each principal to that many requests per `rate_limit_window`.
+  # The default `mcp_rate_limit!` reads this through the overridable
+  # `mcp_rate_limit_max_requests` hook, so a host that keeps the cap in its own
+  # constant/model overrides that hook rather than this value.
+  #
+  # @return [Integer, nil]
+  attr_accessor :rate_limit_max_requests
+
+  # The fixed rate-limit window, in seconds (default 3600 = 1 hour). Ignored
+  # while `rate_limit_max_requests` is nil.
+  #
+  # @return [Integer]
+  attr_accessor :rate_limit_window
+
+  # --- superuser (optional, first-class) -------------------------------------
+
+  # Optional resolver deciding whether a principal is a SUPERUSER — a cross-tenant
+  # caller that may reach `superusers_only!` resources. `->(principal) -> Boolean`.
+  # When set, McpToolkit::Authority::Context#superuser? calls it; when nil (the
+  # default) the context falls back to duck-typing `principal.superuser?` (false
+  # when the principal doesn't respond to it). Superuser is FULLY OPTIONAL: a host
+  # with no such concept leaves this nil and flags no `superusers_only!` resource,
+  # so no caller is ever a superuser.
+  #
+  # @return [#call, nil]
+  attr_accessor :superuser_resolver
+
   # --- filtering -------------------------------------------------------------
 
   # Escapes LIKE wildcards in `matches` / `does_not_match` filter values so they
@@ -123,6 +174,14 @@ class McpToolkit::Configuration
   # @return [String, nil] protocol version to pin on the underlying MCP::Server.
   #   nil lets the gem negotiate (recommended). Set only to force an older spec.
   attr_accessor :protocol_version
+
+  # The protocol versions the hand-rolled AUTHORITY dispatcher
+  # (McpToolkit::Dispatcher) negotiates, newest first. `initialize` echoes the
+  # requested version when it is in this set, else the first (latest). Defaults to
+  # McpToolkit::Protocol::SUPPORTED_VERSIONS; override to pin a host's own set.
+  #
+  # @return [Array<String>]
+  attr_accessor :supported_protocol_versions
 
   # The parent class (as a String, resolved via `constantize`) of the
   # gem-provided McpToolkit::ServerController that McpToolkit::Engine mounts.
@@ -151,11 +210,110 @@ class McpToolkit::Configuration
   # @return [McpToolkit::Registry]
   attr_accessor :registry
 
+  # --- gateway / upstreams ---------------------------------------------------
+
+  # @return [Integer] HTTP open/read timeout (s) for a gateway's calls to an
+  #   upstream MCP server (McpToolkit::Gateway::Client).
+  attr_accessor :upstream_timeout
+  # @return [Integer] TTL (s) for an upstream's cached, namespaced tool list in
+  #   McpToolkit::Gateway::Aggregator.
+  attr_accessor :upstream_list_ttl
+
+  # The registry of upstream MCP servers this gateway aggregates + proxies to.
+  # Each config carries its own (like `registry`), so it resets with a fresh
+  # config. Register via the `register_upstream` sugar below or directly on this
+  # instance. Empty unless the app registers upstreams, so a non-gateway app is
+  # unaffected.
+  #
+  # @return [McpToolkit::Gateway::UpstreamRegistry]
+  attr_reader :upstreams
+
+  # --- authority hooks -------------------------------------------------------
+  #
+  # Injection points for the AUTHORITY transport (McpToolkit::Authority::
+  # ControllerMethods) so a PURE host drives billing/tenancy from config without
+  # subclassing. A host whose logic touches its own models overrides the matching
+  # hook METHOD on its McpToolkit::Authority::ServerController subclass instead;
+  # then these stay nil. All default to nil (a no-op).
+
+  # OPTIONAL escape hatch that FULLY REPLACES the built-in limiter: a
+  # `->(controller:, principal:)` that renders + halts when over the limit (or
+  # sets rate-limit headers when under). When set, `mcp_rate_limit!` delegates to
+  # it and the built-in (`rate_limit_max_requests`) is skipped. nil (the default)
+  # means the built-in runs instead. Most hosts want the built-in; reach for this
+  # only when the counting itself must live in app code.
+  #
+  # @return [#call, nil]
+  attr_accessor :rate_limiter
+
+  # Records ONE usage event for a single JSON-RPC call (called per batch element).
+  # `->(request_data:, account:, principal:, controller:)`. MUST never affect the
+  # MCP response. nil = no metering.
+  #
+  # @return [#call, nil]
+  attr_accessor :usage_recorder
+
+  # Persists accumulated usage after the response (an after_action).
+  # `->(controller:)`. MUST never affect the MCP response. nil = no flush.
+  #
+  # @return [#call, nil]
+  attr_accessor :usage_flusher
+
+  # Builds the opaque payload bound to a session on `initialize`. `->(principal:)`
+  # returning a Hash (or nil for none). Lets a host bind e.g.
+  # `{ token_id: principal.id }` so a revoked token can kill an in-flight session,
+  # WITHOUT overriding the controller's `mcp_session_data`. nil (the default) =>
+  # an empty session payload.
+  #
+  # @return [#call, nil]
+  attr_accessor :session_data_builder
+
+  # The host's tool catalog — the api-agnostic seam. Duck-typed; the dispatcher
+  # calls:
+  #
+  #   provider.tool_definitions(context) -> [{ name:, description:, inputSchema: }]
+  #   provider.find(name)                -> a tool object, or nil
+  #
+  # where a tool object responds to `#required_permissions_scope` (String|nil, the
+  # gem's scope gate) and `#call(context:, **arguments)` (returns Hash|String,
+  # which the gem wraps into `{ content: [{ type: "text", text: }] }`). See
+  # McpToolkit::Tools::AuthorityBase for a base that satisfies this. nil = the host
+  # contributes no own tools (a pure gateway).
+  #
+  # @return [#tool_definitions, #find, nil]
+  attr_accessor :tool_provider
+
+  # --- generic tool naming ---------------------------------------------------
+
+  # A prefix prepended to the four GENERIC, Registry-backed authority tool names
+  # (`resources`, `resource_schema`, `get`, `list`) served by
+  # McpToolkit::Authority::RegistryToolProvider. Lets a host NAMESPACE its generic
+  # tools — e.g. set `"foo_"` and they advertise (and resolve) as `foo_resources`,
+  # `foo_resource_schema`, `foo_get`, `foo_list` — so distinct MCP surfaces don't
+  # collide and existing clients keep a stable, host-chosen name. Empty by default,
+  # so the tools keep their bare base names. The prefix value is the host's; the gem
+  # names no app concept.
+  #
+  # @return [String]
+  attr_accessor :generic_tool_name_prefix
+
+  # --- diagnostics -----------------------------------------------------------
+
+  # Optional logger for gateway/session diagnostics. All call sites guard with
+  # `logger&.warn` / `logger&.error`, so nil (the default) silences them. A Rails
+  # host typically sets this to `Rails.logger`.
+  #
+  # @return [#warn, #error, nil]
+  attr_accessor :logger
+
   # Vendor-neutral defaults; apps override the auth wiring + identity as needed.
   def initialize
     @server_name = "mcp-server"
     @server_version = "1.0.0"
     @server_instructions = nil
+
+    @gateway_client_name = nil
+    @gateway_client_version = nil
 
     @serializer_base = nil # set lazily in #serializer_base to avoid load-order issues
 
@@ -174,11 +332,56 @@ class McpToolkit::Configuration
     @sql_sanitizer = McpToolkit::SqlSanitizer.new
 
     @protocol_version = nil
+    @supported_protocol_versions = McpToolkit::Protocol::SUPPORTED_VERSIONS
     @parent_controller = "ActionController::Base"
     @account_meta_key = "mcp-toolkit/account-id"
     @account_id_header = "X-MCP-Account-ID"
 
+    initialize_authority_hook_defaults
+    @generic_tool_name_prefix = ""
+
+    @upstream_timeout = 10
+    @upstream_list_ttl = 900 # 15 minutes
+    @logger = nil
+
     @registry = McpToolkit::Registry.new
+    @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
+  end
+
+  # The authority transport's injection points all default to nil (a no-op): a
+  # pure satellite/gateway never touches them. `rate_limit_window` is the sole
+  # non-nil default (the window size only matters once a cap opts in).
+  def initialize_authority_hook_defaults
+    @rate_limiter = nil
+    @usage_recorder = nil
+    @usage_flusher = nil
+    @session_data_builder = nil
+    @tool_provider = nil
+    @rate_limit_max_requests = nil # nil = rate limiting disabled
+    @rate_limit_window = 3600 # 1 hour
+    @superuser_resolver = nil # nil = duck-type principal.superuser?
+  end
+
+  # Config sugar: register a gateway upstream. Delegates to `upstreams.register`,
+  # so a blank url is ignored (an unconfigured upstream is simply absent). Pass
+  # `public_tool_list: false` for an upstream whose tool list varies by caller
+  # privilege, to opt it out of the shared list cache.
+  #
+  #   c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
+  def register_upstream(key:, url:, public_tool_list: true)
+    upstreams.register(key:, url:, public_tool_list:)
+  end
+
+  # The gateway handshake client name, defaulting to the server identity when the
+  # host hasn't split it. Read (not stored) so a `server_name` change before the
+  # split is set still flows through.
+  def gateway_client_name
+    @gateway_client_name || server_name
+  end
+
+  # The gateway handshake client version, defaulting to the server version.
+  def gateway_client_version
+    @gateway_client_version || server_version
   end
 
   # The serializer base, lazily defaulting to the gem's bundled DSL base. Lazy so
