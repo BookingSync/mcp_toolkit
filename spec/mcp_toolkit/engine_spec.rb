@@ -71,7 +71,13 @@ RSpec.describe "Mountable engine + gem controller" do
       end.new
     end
 
+    # The role decides whether the authority-only introspection route is drawn.
+    # Default to :authority so the full endpoint set is asserted; the satellite
+    # context below covers the gated-off case.
+    let(:auth_role) { :authority }
+
     before do
+      McpToolkit.config.auth_role = auth_role
       recorder = route_recorder
       stub_const("Rails", Module.new)
       # The engine class body now also calls `config.to_prepare { ... }` (lazy
@@ -93,14 +99,27 @@ RSpec.describe "Mountable engine + gem controller" do
 
     after { McpToolkit.send(:remove_const, :Engine) if McpToolkit.const_defined?(:Engine, false) }
 
-    it "draws the MCP endpoints mapping to the server + tokens controller actions" do
+    # The four transport endpoints are drawn for every role.
+    transport_routes = [
+      [:post, "/", "server#create"],
+      [:get, "/", "server#stream"],
+      [:delete, "/", "server#destroy"],
+      [:get, "health", "server#health"]
+    ]
+
+    it "draws the transport endpoints plus the introspection route for an authority" do
       expect(route_recorder.drawn).to contain_exactly(
-        [:post, "/", "server#create"],
-        [:get, "/", "server#stream"],
-        [:delete, "/", "server#destroy"],
-        [:get, "health", "server#health"],
+        *transport_routes,
         [:post, "tokens/introspect", "tokens#introspect"]
       )
+    end
+
+    context "when configured as a satellite (the default role)" do
+      let(:auth_role) { :satellite }
+
+      it "draws the transport endpoints but NOT the authority introspection route" do
+        expect(route_recorder.drawn).to contain_exactly(*transport_routes)
+      end
     end
 
     it "subclasses ::Rails::Engine" do

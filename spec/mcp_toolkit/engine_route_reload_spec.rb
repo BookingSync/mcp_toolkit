@@ -42,7 +42,9 @@ RSpec.describe "Engine survives a route reload", if: rails_available do
   # relative to the engine's own route set (the `/mcp` mount supplies the prefix),
   # so the roots are "/" and the probe is "/health". `mcp_toolkit/server` /
   # `mcp_toolkit/tokens` are the isolated-namespace paths of the gem-provided
-  # McpToolkit::ServerController / McpToolkit::TokensController.
+  # McpToolkit::ServerController / McpToolkit::TokensController. The introspection
+  # route is present because the driver configures this app as an :authority (the
+  # route is authority-gated in config/routes.rb).
   EXPECTED_ENGINE_ROUTES = [
     ["POST",   "/",                  "mcp_toolkit/server#create"],
     ["GET",    "/",                  "mcp_toolkit/server#stream"],
@@ -70,6 +72,11 @@ RSpec.describe "Engine survives a route reload", if: rails_available do
     # Default parent_controller; ActionController::Base (not ::API) keeps the
     # gem-provided controller (which includes the transport concern) loadable.
     McpToolkit.config.parent_controller = "ActionController::Base"
+    # The introspection route is authority-gated (config/routes.rb), so configure
+    # this app as an authority — otherwise the route would (correctly) be absent
+    # and drop out of the reload-survival assertion below. The gating itself is
+    # covered by engine_spec.rb; here we verify the FULL route set survives reload.
+    McpToolkit.config.auth_role = :authority
 
     # The gem requires engine.rb only when Rails::Engine is already defined at the
     # moment mcp_toolkit loads; here mcp_toolkit is required before Rails, so load

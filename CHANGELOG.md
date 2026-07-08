@@ -180,8 +180,11 @@
 - **Authority introspection endpoint** — `McpToolkit::TokensController#introspect`,
   drawn by the engine at `POST /mcp/tokens/introspect`, so a central app answers
   introspection with no controller of its own. Its parent class is configurable via
-  `parent_controller` (like `ServerController`). Safe to draw unconditionally: with
-  no `token_authenticator` it answers `{ valid: false }`.
+  `parent_controller` (like `ServerController`). The route is drawn ONLY when
+  `auth_role` is `:authority`: introspection is the provider side of the protocol,
+  so a satellite (the default role) that mounts the engine gets no such route
+  rather than one it should never answer. The controller also fails safe as defence
+  in depth — with no `token_authenticator` it answers `{ valid: false }`.
 - **`McpToolkit::Session#data`** — an opaque payload attachable at
   `create!(data:)` and round-tripped through `find`, so an authority can bind a
   session to a token id (letting a revoked token kill an in-flight session). The

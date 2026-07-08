@@ -14,7 +14,11 @@
 #   GET    /mcp                     -> stream     (405; no server-initiated SSE)
 #   DELETE /mcp                     -> destroy    (terminate the session)
 #   GET    /mcp/health              -> health     (unauthenticated probe)
-#   POST   /mcp/tokens/introspect   -> introspect (authority token introspection)
+#   POST   /mcp/tokens/introspect   -> introspect (authority token introspection;
+#                                                  drawn ONLY when auth_role is
+#                                                  :authority — a satellite that
+#                                                  mounts the engine gets no such
+#                                                  route)
 #
 # Loaded ONLY when Rails::Engine is available (see lib/mcp_toolkit.rb); the gem's
 # non-Rails consumers and its own unit suite never reference it.
