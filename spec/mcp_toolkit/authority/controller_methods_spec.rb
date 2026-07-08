@@ -17,6 +17,7 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
     Class.new do
       def self.before_action(*); end
       def self.after_action(*); end
+      def self.rescue_from(*); end
       include McpToolkit::Authority::ControllerMethods
 
       attr_accessor :request_body, :request_headers, :params
@@ -344,6 +345,46 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
       controller.create
 
       expect(controller.head_status).to eq(:accepted)
+    end
+  end
+
+  # ---- malformed / non-object input: a JSON-RPC error, never a framework 500 -
+
+  describe "malformed and non-object requests" do
+    it "raises a JSON-RPC ParseError (not a bare JSON error) for a malformed body" do
+      controller.request_body = "{ not json"
+
+      expect { controller.send(:mcp_parse_body) }
+        .to raise_error(McpToolkit::Protocol::ParseError, /Invalid JSON/)
+    end
+
+    it "renders an escaped Protocol::Error as a JSON-RPC envelope with a null id at 400" do
+      controller.send(:mcp_render_protocol_error, McpToolkit::Protocol::ParseError.new)
+
+      rendered = controller.rendered
+      expect(rendered[:status]).to eq(:bad_request)
+      expect(rendered[:json][:id]).to be_nil
+      expect(rendered[:json][:error][:code]).to eq(McpToolkit::Protocol::ErrorCodes::PARSE_ERROR)
+    end
+
+    it "answers a non-object JSON body with InvalidRequest instead of crashing the loop" do
+      controller.request_body = body_for("not-an-object")
+
+      controller.create
+
+      expect(controller.rendered[:json][:id]).to be_nil
+      expect(controller.rendered[:json][:error][:code]).to eq(McpToolkit::Protocol::ErrorCodes::INVALID_REQUEST)
+    end
+
+    it "isolates a non-object batch element to its own InvalidRequest, leaving siblings intact" do
+      authenticate_as(principal)
+      controller.request_body = body_for("bad-element", rpc("ping"))
+
+      controller.create
+
+      responses = controller.rendered[:json]
+      expect(responses.map { |r| r[:error]&.dig(:code) }).to include(McpToolkit::Protocol::ErrorCodes::INVALID_REQUEST)
+      expect(responses.any? { |r| r[:result] == {} }).to be(true)
     end
   end
 

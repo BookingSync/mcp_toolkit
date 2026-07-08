@@ -71,6 +71,20 @@ RSpec.describe McpToolkit::Dispatcher do
       expect(response[:result][:serverInfo]).to eq(name: "acme-mcp", version: "3.1.4")
       expect(response[:result][:capabilities][:tools]).to eq(listChanged: true)
     end
+
+    it "advertises server_instructions when configured, matching the SDK path" do
+      McpToolkit.config.server_instructions = "Prefer the search tool for open-ended asks."
+
+      response = dispatcher.handle_request(request("initialize"))
+
+      expect(response[:result][:instructions]).to eq("Prefer the search tool for open-ended asks.")
+    end
+
+    it "omits instructions when none are configured" do
+      response = dispatcher.handle_request(request("initialize"))
+
+      expect(response[:result]).not_to have_key(:instructions)
+    end
   end
 
   describe "notifications (no id)" do

@@ -112,7 +112,7 @@ class McpToolkit::Dispatcher
     versions = config.supported_protocol_versions
     negotiated = versions.include?(requested) ? requested : versions.first
 
-    {
+    result = {
       protocolVersion: negotiated,
       capabilities: {
         # listChanged: true — the aggregated list includes upstream tools, which
@@ -125,6 +125,12 @@ class McpToolkit::Dispatcher
         version: config.server_version
       }
     }
+
+    # `instructions` is advertised on initialize only when configured, matching the
+    # SDK-backed satellite server (McpToolkit::Server.build) and the documented
+    # contract. Omitted when nil to keep the envelope clean.
+    result[:instructions] = config.server_instructions if config.server_instructions
+    result
   end
 
   def handle_initialized

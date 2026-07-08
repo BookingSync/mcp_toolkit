@@ -55,6 +55,15 @@ module McpToolkit::Authority::ControllerMethods
   included do
     protect_from_forgery with: :null_session if respond_to?(:protect_from_forgery)
 
+    # A Protocol::Error that escapes the per-call loop is, in practice, a
+    # parse/shape error raised at the request boundary (a malformed JSON body from
+    # mcp_parse_body, fired here even from the mcp_resolve_session! before_action).
+    # Without this it would surface as a framework 500; the MCP spec wants a
+    # JSON-RPC error envelope for bad input. Guarded behind respond_to? like
+    # protect_from_forgery: every real host (ActionController::API/::Base) carries
+    # ActiveSupport::Rescuable, a bare non-Rails host simply skips it.
+    rescue_from McpToolkit::Protocol::Error, with: :mcp_render_protocol_error if respond_to?(:rescue_from)
+
     before_action :mcp_authenticate!, except: [:health]
     before_action :mcp_rate_limit!, except: [:health]
     before_action :mcp_resolve_session!, only: [:create]
@@ -256,6 +265,11 @@ module McpToolkit::Authority::ControllerMethods
   # account id) becomes this call's JSON-RPC error, leaving sibling batch elements
   # untouched.
   def mcp_process_single_request(request_data)
+    # A request element that isn't a JSON object can't carry an id, a method, or
+    # params, so downstream `.to_h`/`.key?` would raise a NoMethodError (a 500).
+    # Treat it as a JSON-RPC InvalidRequest with a null id instead.
+    return mcp_invalid_request_response unless request_data.is_a?(Hash)
+
     account = mcp_resolve_account(request_data)
     mcp_track_usage(request_data, account)
     mcp_dispatch(request_data, account)
@@ -263,6 +277,15 @@ module McpToolkit::Authority::ControllerMethods
     return nil unless request_data.is_a?(Hash) && request_data.key?("id")
 
     McpToolkit::Protocol.error_response(id: request_data["id"], error: e)
+  end
+
+  # The response for a non-object request element: no id/method is recoverable, so
+  # it's an InvalidRequest carrying a null id (JSON-RPC 2.0 §4.2 / batch handling).
+  def mcp_invalid_request_response
+    McpToolkit::Protocol.error_response(
+      id: nil,
+      error: McpToolkit::Protocol::InvalidRequest.new("Request must be a JSON object")
+    )
   end
 
   # Renders the JSON-RPC payload as application/json (default) or text/event-stream
@@ -359,6 +382,12 @@ module McpToolkit::Authority::ControllerMethods
       id: nil,
       error: { code: -32_001, message: "Session not found or expired" }
     }, status: :not_found
+  end
+
+  # Renders a boundary Protocol::Error (parse/shape failure) as a JSON-RPC error
+  # envelope with a null id at HTTP 400, rather than letting it become a 500.
+  def mcp_render_protocol_error(error)
+    render json: McpToolkit::Protocol.error_response(id: nil, error:), status: :bad_request
   end
 
   # ---- body parsing ---------------------------------------------------
