@@ -140,9 +140,26 @@ class McpToolkit::Configuration
   # `session_payload_loader` receives a stored hash and returns the `data`
   # hash. Both nil (the default) = the gem's native `{ created_at:, data: }`
   # format. Set BOTH together so every instance reads what any instance wrote.
+  # For the common case — a flat legacy hash whose keys are simply named
+  # differently — prefer the declarative `session_payload_key_map` instead.
   #
   # @return [Proc, nil]
   attr_accessor :session_payload_dumper, :session_payload_loader
+
+  # Declarative session codec for the common legacy format: a FLAT stored hash
+  # (no `{ created_at:, data: }` envelope) whose keys are renamed from the
+  # session's `data` keys. Maps data-key => stored-key; unmapped keys pass
+  # through unchanged in both directions, and stored keys are symbolized on
+  # read (so a string-keyed cache coder still round-trips):
+  #
+  #   config.session_payload_key_map = { token_id: :legacy_token_id }
+  #   # data { token_id: 5 } is stored as { legacy_token_id: 5 } and read back
+  #
+  # Empty (the default) = the gem's native format. An explicit
+  # `session_payload_dumper` / `session_payload_loader` takes precedence.
+  #
+  # @return [Hash{Symbol => Symbol}]
+  attr_accessor :session_payload_key_map
 
   # --- rate limiting ---------------------------------------------------------
 
@@ -187,6 +204,10 @@ class McpToolkit::Configuration
   # @return [#sanitize_sql_like]
   attr_accessor :sql_sanitizer
 
+  # NOTE: (all data-path settings below): the list/get executors and the schema
+  # builder read the PROCESS-GLOBAL `McpToolkit.config` — a per-instance config
+  # bound to a provider affects tool prose only. Configure these globally.
+  #
   # How a BARE (non-operator) filter value is interpreted by the list executor:
   #
   #   :tokenized (default) — a comma-separated string becomes an IN set, the
@@ -335,11 +356,31 @@ class McpToolkit::Configuration
   # where a tool object responds to `#required_permissions_scope` (String|nil, the
   # gem's scope gate) and `#call(context:, **arguments)` (returns Hash|String,
   # which the gem wraps into `{ content: [{ type: "text", text: }] }`). See
-  # McpToolkit::Tools::AuthorityBase for a base that satisfies this. nil = the host
-  # contributes no own tools (a pure gateway).
+  # McpToolkit::Tools::AuthorityBase for a base that satisfies this.
   #
-  # @return [#tool_definitions, #find, nil]
-  attr_accessor :tool_provider
+  # UNSET (the default), the provider is composed automatically: the generic
+  # RegistryToolProvider (bound to this config) first, then every entry of
+  # `extra_tool_providers` — so a host that only serves the generic tools plus
+  # its own bespoke ones needs no provider plumbing at all. Assign explicitly to
+  # take full control of the catalog.
+  #
+  # @return [#tool_definitions, #find]
+  attr_writer :tool_provider
+
+  def tool_provider
+    @tool_provider || composed_tool_provider
+  end
+
+  # Additional tool providers (or bare TOOL classes, auto-wrapped in a
+  # SingleToolProvider) composed AFTER the generic Registry-backed tools when
+  # `tool_provider` is not explicitly assigned. The registry provider is always
+  # first, so a generic tool name resolves to it; extras only answer their own
+  # names.
+  #
+  #   config.extra_tool_providers = [MyApp::Tools::AuditLog]
+  #
+  # @return [Array<#tool_definitions, Class>]
+  attr_accessor :extra_tool_providers
 
   # --- generic tool naming ---------------------------------------------------
 
@@ -412,12 +453,33 @@ class McpToolkit::Configuration
     @session_key_prefix = "mcp_toolkit:session:"
     @session_payload_dumper = nil
     @session_payload_loader = nil
+    @session_payload_key_map = {}
 
     @sql_sanitizer = McpToolkit::SqlSanitizer.new
     @bare_filter_value_semantics = :tokenized
     @non_numeric_pk_order = :created_at
     @filter_operator_overrides = {}
   end
+
+  # The default authority tool catalog when no explicit `tool_provider` is
+  # assigned: the generic Registry-backed tools first (so a generic name always
+  # resolves to them; included only when the host registered resources — a pure
+  # gateway keeps contributing nothing), then each extra provider — a bare tool
+  # CLASS is wrapped in a SingleToolProvider. Built per read (cheap, stateless
+  # providers), so a reload that re-assigns `extra_tool_providers` or registers
+  # resources takes effect immediately.
+  def composed_tool_provider
+    providers = []
+    providers << McpToolkit::Authority::RegistryToolProvider.new(config: self) if registry.resources.any?
+    Array(extra_tool_providers).each do |provider|
+      providers << (provider.respond_to?(:tool_definitions) ? provider : McpToolkit::Authority::SingleToolProvider.new(provider))
+    end
+    return nil if providers.empty?
+    return providers.first if providers.one?
+
+    McpToolkit::Authority::CompositeToolProvider.new(*providers)
+  end
+  private :composed_tool_provider
 
   # The authority transport's injection points all default to nil (a no-op): a
   # pure satellite/gateway never touches them. `rate_limit_window` is the sole
@@ -428,6 +490,7 @@ class McpToolkit::Configuration
     @usage_flusher = nil
     @session_data_builder = nil
     @tool_provider = nil
+    @extra_tool_providers = []
     @rate_limit_max_requests = nil # nil = rate limiting disabled
     @rate_limit_window = 3600 # 1 hour
     @superuser_resolver = nil # nil = duck-type principal.superuser?
@@ -441,6 +504,19 @@ class McpToolkit::Configuration
   #   c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
   def register_upstream(key:, url:, public_tool_list: true)
     upstreams.register(key:, url:, public_tool_list:)
+  end
+
+  # Declares the gateway's upstreams from an ENV-var map — `{ key => env var
+  # name }` — the shape every authority host repeats: resets the registry first
+  # (idempotent across code reloads, where the registration typically re-runs in
+  # a `to_prepare`), and an upstream whose ENV url is blank is never registered,
+  # so an unconfigured environment behaves like no-upstreams. `env` is
+  # injectable for tests.
+  #
+  #   config.register_upstreams_from_env("billing" => "BILLING_MCP_URL")
+  def register_upstreams_from_env(mapping, env: ENV)
+    upstreams.reset!
+    mapping.each { |key, env_var| register_upstream(key:, url: env[env_var.to_s]) }
   end
 
   # The gateway handshake client name, defaulting to the server identity when the

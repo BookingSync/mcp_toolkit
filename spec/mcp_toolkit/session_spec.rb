@@ -125,4 +125,60 @@ RSpec.describe McpToolkit::Session do
       expect(McpToolkit.config.cache_store.read("legacy:session:#{created.id}")).to be_nil
     end
   end
+
+  describe "declarative session_payload_key_map (flat legacy format)" do
+    before do
+      McpToolkit.configure do |c|
+        c.session_key_prefix = "legacy:session:"
+        c.session_payload_key_map = { token_id: :legacy_token_id }
+      end
+    end
+
+    it "stores the data hash FLAT with renamed keys (no created_at/data envelope)" do
+      created = described_class.create!(data: { token_id: 42 })
+
+      expect(McpToolkit.config.cache_store.read("legacy:session:#{created.id}")).to eq(legacy_token_id: 42)
+    end
+
+    it "reads a legacy row back into the data keys" do
+      id = SecureRandom.uuid
+      McpToolkit.config.cache_store.write("legacy:session:#{id}", { legacy_token_id: 7 })
+
+      expect(described_class.find(id).data).to eq(token_id: 7)
+    end
+
+    it "symbolizes string-keyed rows (a JSON-coded cache store still round-trips)" do
+      id = SecureRandom.uuid
+      McpToolkit.config.cache_store.write("legacy:session:#{id}", { "legacy_token_id" => 7 })
+
+      expect(described_class.find(id).data).to eq(token_id: 7)
+    end
+
+    it "passes unmapped keys through unchanged in both directions" do
+      created = described_class.create!(data: { token_id: 42, locale: "fr" })
+
+      expect(McpToolkit.config.cache_store.read("legacy:session:#{created.id}"))
+        .to eq(legacy_token_id: 42, locale: "fr")
+      expect(described_class.find(created.id).data).to eq(token_id: 42, locale: "fr")
+    end
+
+    it "tolerates a malformed (non-Hash) stored row" do
+      id = SecureRandom.uuid
+      McpToolkit.config.cache_store.write("legacy:session:#{id}", "corrupt")
+
+      expect(described_class.find(id).data).to eq({})
+    end
+
+    it "yields to an explicit dumper/loader pair when both are configured" do
+      McpToolkit.configure do |c|
+        c.session_payload_dumper = ->(data) { { custom: data[:token_id] } }
+        c.session_payload_loader = ->(stored) { { token_id: stored[:custom] } }
+      end
+
+      created = described_class.create!(data: { token_id: 9 })
+
+      expect(McpToolkit.config.cache_store.read("legacy:session:#{created.id}")).to eq(custom: 9)
+      expect(described_class.find(created.id).data).to eq(token_id: 9)
+    end
+  end
 end

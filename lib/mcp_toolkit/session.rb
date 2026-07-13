@@ -48,10 +48,15 @@ class McpToolkit::Session
   private_class_method :cache_key
 
   # The stored payload defaults to the gem's `{ created_at:, data: }` format; a
-  # host migrating a pre-gem session store injects a dumper/loader pair to keep
-  # the historical wire format (see Configuration#session_payload_dumper).
+  # host migrating a pre-gem session store injects a dumper/loader pair — or,
+  # for the common flat-hash-with-renamed-keys legacy format, the declarative
+  # `session_payload_key_map` (see Configuration docs; an explicit dumper/loader
+  # pair takes precedence over the map).
   def self.dump(data, config)
     return config.session_payload_dumper.call(data) if config.session_payload_dumper
+
+    map = config.session_payload_key_map
+    return data.transform_keys { |key| map.fetch(key, key) } if map.any?
 
     { created_at: Time.now.to_i, data: }
   end
@@ -59,6 +64,16 @@ class McpToolkit::Session
 
   def self.load_data(stored, config)
     return config.session_payload_loader.call(stored) || {} if config.session_payload_loader
+
+    map = config.session_payload_key_map
+    if map.any?
+      return {} unless stored.is_a?(Hash)
+
+      # Symbolize first so a string-keyed cache coder still round-trips, then
+      # rename stored keys back to data keys (unmapped keys pass through).
+      inverse = map.invert
+      return stored.symbolize_keys.transform_keys { |key| inverse.fetch(key, key) }
+    end
 
     # `data` defaults to {} for legacy rows written before the payload existed.
     stored[:data] || {}

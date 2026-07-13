@@ -68,6 +68,27 @@ the pre-gem contract:
   "cannot be filtered with operators", and `date` columns accept `in` again.
 - The `list` tools' input schemas declare `additionalProperties: true`
   explicitly (resource-specific filters arrive as top-level arguments).
+- `config.session_payload_key_map` — declarative codec for the common legacy
+  session format (a flat stored hash with renamed keys): maps data-key =>
+  stored-key, unmapped keys pass through, stored keys are symbolized on read
+  (string-keyed cache coders round-trip). Replaces hand-written
+  dumper/loader lambdas for the single-key-rename case; an explicit
+  dumper/loader pair still takes precedence.
+- `config.register_upstreams_from_env(mapping, env: ENV)` — declares gateway
+  upstreams from a `{ key => env var }` map: resets the registry first
+  (idempotent across code reloads) and skips blank urls, the two gotchas every
+  authority host re-discovers.
+- `config.tool_provider` composes a sensible default when unset: the generic
+  Registry-backed provider (only when resources are registered — a pure
+  gateway still contributes nothing) plus `config.extra_tool_providers`
+  (providers, or bare tool classes auto-wrapped in the new
+  `Authority::SingleToolProvider`). Hosts with one bespoke tool no longer
+  hand-roll provider plumbing; assigning `tool_provider` explicitly still
+  takes full control.
+- `McpToolkit::Serializer::AssociationDescriptor` + `TargetRef` — the exported
+  structs for the association duck-type the schema builder and field selection
+  probe, so a host adapting its own serializer framework doesn't re-derive the
+  field names by hand.
 - The authority `list` tool's served description states the bare-value grammar
   the host ACTUALLY configured: under `:literal` semantics the comma/`"null"`
   tokenization bullet is replaced by the literal-matching one, so served docs

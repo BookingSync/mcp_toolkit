@@ -108,4 +108,28 @@ RSpec.describe McpToolkit::Gateway::UpstreamRegistry do
       expect(McpToolkit.config.upstreams.all).to be_empty
     end
   end
+
+  describe "config.register_upstreams_from_env" do
+    it "registers every upstream whose ENV url is present, skipping blanks" do
+      McpToolkit.config.register_upstreams_from_env(
+        { "notifications" => "NOTIF_URL", "billing" => "BILLING_URL", "empty" => "EMPTY_URL" },
+        env: { "NOTIF_URL" => "http://notif.test/mcp", "BILLING_URL" => "http://billing.test/mcp", "EMPTY_URL" => "" }
+      )
+
+      expect(McpToolkit.config.upstreams.all.map(&:key)).to eq(%w[notifications billing])
+    end
+
+    it "resets the registry first (idempotent across code reloads)" do
+      McpToolkit.config.register_upstream(key: "stale", url: "http://stale.test/mcp")
+
+      McpToolkit.config.register_upstreams_from_env(
+        { "notifications" => "NOTIF_URL" }, env: { "NOTIF_URL" => "http://notif.test/mcp" }
+      )
+      McpToolkit.config.register_upstreams_from_env(
+        { "notifications" => "NOTIF_URL" }, env: { "NOTIF_URL" => "http://notif.test/mcp" }
+      )
+
+      expect(McpToolkit.config.upstreams.all.map(&:key)).to eq(%w[notifications])
+    end
+  end
 end
