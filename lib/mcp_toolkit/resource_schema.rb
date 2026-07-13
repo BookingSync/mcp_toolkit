@@ -42,7 +42,8 @@ class McpToolkit::ResourceSchema
       attributes:,
       relationships:,
       standard_filters: STANDARD_FILTERS,
-      filters:
+      filters:,
+      resource_filters:
     }
   end
 
@@ -89,6 +90,20 @@ class McpToolkit::ResourceSchema
         type: type ? type.to_s : COMPUTED_TYPE,
         format: type ? TYPE_FORMATS[type] : nil
       }.compact
+    end
+  end
+
+  # The resource's custom filters (Resource#filter) — resource-specific filters
+  # passed as TOP-LEVEL params of the `list` tool (NOT inside `filter`), each
+  # applied by a host-supplied block. Surfaced with name/type/description so a
+  # client can discover them; `[]` for a resource that declares none.
+  def resource_filters
+    resource.custom_filters.each_value.map do |custom_filter|
+      {
+        name: custom_filter.name.to_s,
+        type: custom_filter.type.to_s,
+        description: custom_filter.description
+      }
     end
   end
 

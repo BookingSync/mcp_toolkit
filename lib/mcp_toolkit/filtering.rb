@@ -4,7 +4,9 @@
 # the following semantics:
 #
 #   * a BARE value filters by equality:               filter: { booking_id: 42 }
-#     (a comma-separated string becomes an IN lookup:  filter: { status: "a,b" })
+#     - a comma-separated string becomes an IN lookup: filter: { status: "a,b" }
+#     - an Array of scalars becomes an IN lookup too:  filter: { status: ["a", "b"] }
+#     - the string "null" (or a JSON null) matches NULL rows: filter: { canceled_at: "null" }
 #   * an { op:, value: } HASH filters with an operator: filter: { price: { op: "gteq", value: 100 } }
 #   * an ARRAY of those hashes ANDs them (ranges):
 #       filter: { price: [{ op: "gteq", value: 100 }, { op: "lt", value: 200 }] }
@@ -47,9 +49,13 @@ module McpToolkit::Filtering
       apply_condition(relation, column, value, config:)
     elsif collection?(value)
       value.inject(relation) { |rel, condition| apply_condition(rel, column, condition, config:) }
+    elsif mixed_collection?(value)
+      raise McpToolkit::Errors::InvalidParams,
+            "a filter array must contain either only { op:, value: } conditions or only bare values"
     else
-      # Bare value: equality. A comma-separated string becomes an IN lookup,
-      # matching the implicit `eq` semantics.
+      # Bare value(s): equality. A comma-separated string or an Array of scalars
+      # becomes an IN lookup, matching the implicit `eq` semantics; "null" / a
+      # JSON null matches NULL rows.
       relation.where(column => equality_value(value))
     end
   end
@@ -62,6 +68,13 @@ module McpToolkit::Filtering
   # Several operator-based conditions on one attribute, ANDed (ranges).
   def self.collection?(value)
     value.is_a?(Array) && value.any? && value.all? { |element| compound?(element) }
+  end
+
+  # An Array mixing operator conditions with bare values — rejected explicitly:
+  # neither the AND-of-conditions nor the IN-set reading fits, and treating it as
+  # either would silently match the wrong rows.
+  def self.mixed_collection?(value)
+    value.is_a?(Array) && value.any? { |element| compound?(element) }
   end
 
   def self.condition_hash?(value)
@@ -113,25 +126,35 @@ module McpToolkit::Filtering
   # test fake) receives a portable Predicate value object it knows how to apply.
   def self.predicate_for(relation, column, operator, raw, config:)
     value = normalize_value(operator, raw, config:)
-    arel_operator = operator == "eq" ? "in" : operator
 
     model = relation.respond_to?(:model) ? relation.model : nil
     if model.respond_to?(:arel_table)
-      model.arel_table[column.to_sym].public_send(arel_operator, value)
+      model.arel_table[column.to_sym].public_send(arel_operator(operator, value), value)
     else
-      Predicate.new(column.to_sym, arel_operator, value)
+      Predicate.new(column.to_sym, arel_operator(operator, value), value)
     end
   end
 
-  # `eq` against a (possibly comma-separated) value becomes an IN set. `matches`
-  # / `does_not_match` wrap the value in `%...%` with LIKE wildcards escaped so
-  # they match literally. `null` => nil for every operator.
+  # `eq` fans out to an IN lookup (normalize_value turns its value into a set) —
+  # EXCEPT against NULL: Arel renders `in(nil)` as `IN (NULL)`, which matches no
+  # rows in SQL, so eq/in with a nil value stay/become `eq` (rendered `IS NULL`).
+  def self.arel_operator(operator, value)
+    return operator unless %w[eq in].include?(operator)
+
+    value.nil? ? "eq" : "in"
+  end
+
+  # `eq` / `in` against a (possibly comma-separated string or Array) value
+  # becomes an IN set. `matches` / `does_not_match` wrap the value in `%...%`
+  # with LIKE wildcards escaped so they match literally. `null` / a JSON null
+  # => nil for every operator.
   def self.normalize_value(operator, raw, config:)
-    return nil if raw.to_s == NULL_TOKEN
+    return nil if raw.nil? || raw.to_s == NULL_TOKEN
 
     case operator
     when "eq", "in"
-      raw.to_s.split(",")
+      resolved = equality_value(raw)
+      resolved.is_a?(Array) ? resolved : [resolved]
     when "matches", "does_not_match"
       "%#{config.sql_sanitizer.sanitize_sql_like(raw.to_s)}%"
     else
@@ -139,7 +162,17 @@ module McpToolkit::Filtering
     end
   end
 
+  # A bare (non-operator) filter value resolved for equality: `"null"` / nil =>
+  # nil (matches NULL rows); a comma-separated string => its parts (IN); an
+  # Array => an IN set, each element resolved the same way with comma-splits
+  # flattened in.
   def self.equality_value(value)
+    if value.is_a?(Array)
+      return value.flat_map do |element|
+        resolved = equality_value(element)
+        resolved.is_a?(Array) ? resolved : [resolved]
+      end
+    end
     return nil if value.to_s == NULL_TOKEN
 
     str = value.to_s

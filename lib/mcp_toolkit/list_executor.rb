@@ -67,9 +67,19 @@ class McpToolkit::ListExecutor
   end
 
   # Order by `id` when the primary key is numeric; otherwise by `created_at`
-  # (a non-numeric PK does not sort meaningfully).
+  # (a non-numeric PK does not sort meaningfully) with the primary key as a
+  # tiebreaker — rows bulk-inserted in one transaction share a `created_at`, and
+  # without a total order offset pagination could duplicate or skip rows.
   def apply_order(relation)
-    relation.order(numeric_primary_key? ? :id : :created_at)
+    return relation.order(:id) if numeric_primary_key?
+
+    relation.order(:created_at, primary_key_column)
+  end
+
+  def primary_key_column
+    model = resource.model
+    pk = model.respond_to?(:primary_key) ? model.primary_key : nil
+    (pk || "id").to_sym
   end
 
   def numeric_primary_key?
@@ -100,7 +110,9 @@ class McpToolkit::ListExecutor
     validate_filter_keys!(filter, mapping)
 
     filter.each do |request_key, value|
-      next if value.nil? || value == ""
+      # A JSON null flows through as an IS NULL filter (like the "null" string
+      # token — see McpToolkit::Filtering); only an empty string means "no filter".
+      next if value == ""
 
       column = mapping[request_key.to_sym]
       relation = McpToolkit::Filtering.apply(relation, column, value)

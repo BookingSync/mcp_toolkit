@@ -1,3 +1,46 @@
+## [0.4.1] - 2026-07-13
+
+Backward-compatibility and discoverability fixes for the authority-path generic
+tools, driven by an adopting host's parity review against the API contract the
+gem replaced.
+
+### Added
+
+- `resource_schema` surfaces a resource's custom filters (`Resource#filter`)
+  under `resource_filters` — name, type and description — so a client can
+  discover them. The `Resource#filter` docs always promised this; nothing
+  delivered it, leaving custom filters functional but unadvertised.
+- The `resources` tool returns `filterable` (whether the resource accepts any
+  filter — allowlist or custom) and the resource's usage `note` alongside
+  name/description, so caveats surface at browse time, before a client picks a
+  resource.
+- The `list` tool description documents the full filter grammar — bare
+  equality, comma/array IN sets, the `"null"` token, `{ op:, value: }`
+  conditions and AND-ed condition arrays — plus resource-specific top-level
+  filters. Previously the operator payload shape was not documented anywhere a
+  client could see at runtime.
+- Bare equality filters accept an Array of scalars as an IN set
+  (`filter: { status: ["a", "b"] }`). Previously the array was stringified and
+  comma-split into fragments that silently matched nothing.
+- A JSON null filter value filters for `IS NULL` (like the `"null"` string
+  token). Previously it was silently ignored.
+
+### Fixed
+
+- Generic tool descriptions and input schemas rewrite sibling-tool references
+  (e.g. "use the `resources` tool") to carry `config.generic_tool_name_prefix`,
+  so a host that namespaces its generic tools no longer serves prose pointing
+  at unprefixed tool names that do not exist on its server.
+- `eq` / `in` operator conditions against `"null"` / null render `IS NULL`
+  instead of `IN (NULL)`, which matches no rows in SQL.
+- `eq` / `in` operator conditions accept an Array `value` (previously
+  stringified and comma-split into fragments).
+- Non-numeric-PK resources order by `created_at` WITH the primary key as a
+  tiebreaker, restoring a total order so offset pagination cannot duplicate or
+  skip rows that share a timestamp (e.g. bulk inserts).
+- An Array mixing `{ op:, value: }` conditions with bare values is rejected
+  with InvalidParams instead of being misread as bare equality values.
+
 ## [0.4.0] - 2026-07-06
 
 ### Added

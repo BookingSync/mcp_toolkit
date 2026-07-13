@@ -98,6 +98,78 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
     end
 
+    it "treats an Array of scalars as an IN set (API v3 parity)" do
+      result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: [10, 20] } })
+
+      expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
+    end
+
+    it "flattens comma-separated strings inside an Array into the IN set" do
+      result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: ["10,20"] } })
+
+      expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
+    end
+
+    it "rejects an Array mixing operator conditions and bare values" do
+      expect do
+        described_class.call(
+          resource:, scope_root: account,
+          params: { filter: { price: [{ op: "gteq", value: 100 }, 200] } }
+        )
+      end.to raise_error(McpToolkit::Errors::InvalidParams, /only \{ op:, value: \} conditions or only bare values/)
+    end
+
+    describe "NULL filtering (API v3 parity)" do
+      let(:rows) do
+        [
+          FakeRecord.new(id: 1, name: "alpha", booking_id: 10, price: 100),
+          FakeRecord.new(id: 2, name: "beta", booking_id: nil, price: 200)
+        ]
+      end
+
+      it "treats the \"null\" token as IS NULL" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: "null" } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "treats a JSON null as IS NULL (not a silently-dropped filter)" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: nil } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "still treats an empty string as no filter" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: "" } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2])
+      end
+
+      it "resolves { op: \"eq\", value: \"null\" } to IS NULL (not IN (NULL))" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: { op: "eq", value: "null" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "resolves { op: \"not_eq\", value: \"null\" } to IS NOT NULL" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: { op: "not_eq", value: "null" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "accepts an Array value for an { op: \"in\" } condition" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "in", value: ["alpha"] } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+    end
+
     it "rejects unknown filter keys with InvalidParams" do
       expect do
         described_class.call(resource:, scope_root: account, params: { filter: { bogus: 1 } })
@@ -183,13 +255,13 @@ RSpec.describe "Registry + executors + serializer (data path)" do
     end
 
     describe "ordering by numeric vs non-numeric primary key (API v3 parity)" do
-      # A relation that records which column it was last ordered by.
+      # A relation that records which column(s) it was last ordered by.
       let(:ordering_relation_class) do
         Class.new(FakeRelation) do
           attr_reader :ordered_by
 
-          def order(column)
-            @ordered_by = column
+          def order(*columns)
+            @ordered_by = columns.length == 1 ? columns.first : columns
             super
           end
         end
@@ -227,12 +299,15 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         expect(rel.ordered_by).to eq(:id)
       end
 
-      it "orders by :created_at when the primary key is non-numeric" do
+      it "orders by :created_at with the PK as tiebreaker when the primary key is non-numeric" do
         rel = register_resource_with_pk_type(:uuid)
 
         described_class.call(resource: McpToolkit.registry.fetch("things"), scope_root: account, params: {})
 
-        expect(rel.ordered_by).to eq(:created_at)
+        # The PK tiebreaker restores a total order: rows bulk-inserted in one
+        # transaction share a created_at, and offset pagination over a partial
+        # order can duplicate or skip rows across pages.
+        expect(rel.ordered_by).to eq(%i[created_at id])
       end
     end
 
@@ -398,6 +473,37 @@ RSpec.describe "Registry + executors + serializer (data path)" do
 
     it "passes through a nil note for a resource without one" do
       expect(described_class.call(resource)).to include(note: nil)
+    end
+
+    it "advertises an empty resource_filters list for a resource without custom filters" do
+      expect(described_class.call(resource)).to include(resource_filters: [])
+    end
+
+    context "with custom filters (the Resource#filter seam)" do
+      before do
+        serializer = widget_serializer
+        model = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:filtered_widgets) do
+            model model
+            serializer serializer
+            description "Widgets with a relational custom filter."
+            filter :for_booking, type: :integer, description: "Only widgets for this booking" do |relation, value|
+              relation.where(booking_id: value)
+            end
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "surfaces each custom filter's name, type and description under resource_filters" do
+        schema = described_class.call(McpToolkit.registry.fetch("filtered_widgets"))
+
+        expect(schema[:resource_filters]).to eq(
+          [{ name: "for_booking", type: "integer", description: "Only widgets for this booking" }]
+        )
+      end
     end
 
     context "with a resource note" do

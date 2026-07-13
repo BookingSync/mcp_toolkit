@@ -165,10 +165,66 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
   describe "the `resources` tool" do
     subject(:resources) { provider.find("resources") }
 
-    it "lists every registered resource's name and description" do
+    it "lists every registered resource's name, description and filterability" do
       result = resources.call(context:)
 
-      expect(result[:resources]).to contain_exactly({ name: "widgets", description: "Test widgets." })
+      expect(result[:resources]).to contain_exactly(
+        { name: "widgets", description: "Test widgets.", filterable: true }
+      )
+    end
+
+    context "with an unfilterable resource carrying a usage note" do
+      before do
+        s = widget_serializer
+        m = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:raw_events) do
+            model m
+            serializer s
+            description "Raw events."
+            note "Internal debugging data; do not interpret without domain knowledge."
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "surfaces filterable: false and the note at browse time" do
+        result = provider.find("resources").call(context:)
+
+        expect(result[:resources]).to include(
+          name: "raw_events",
+          description: "Raw events.",
+          filterable: false,
+          note: "Internal debugging data; do not interpret without domain knowledge."
+        )
+      end
+    end
+
+    context "with a resource whose only filter is a custom filter" do
+      before do
+        s = widget_serializer
+        m = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:custom_only) do
+            model m
+            serializer s
+            description "Custom-filter-only."
+            filter :for_booking, type: :integer, description: "Only rows for this booking" do |relation, value|
+              relation.where(booking_id: value)
+            end
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "counts the custom filter as filterable" do
+        result = provider.find("resources").call(context:)
+        entry = result[:resources].find { |resource| resource[:name] == "custom_only" }
+
+        expect(entry).to include(filterable: true)
+      end
     end
   end
 
@@ -284,6 +340,24 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
 
       it "no longer resolves the bare base name (only the prefixed name is a tool)" do
         expect(provider.find("list")).to be_nil
+      end
+
+      # Prose pointing at `resources` on a server that only advertises
+      # `foo_resources` would send a client to a tool that does not exist.
+      it "rewrites sibling-tool references in every description to the prefixed names" do
+        provider.tool_definitions(context).each do |definition|
+          expect(definition[:description]).not_to match(/`(resources|resource_schema|get|list)`/)
+        end
+
+        list_definition = provider.tool_definitions(context).find { |d| d[:name] == "foo_list" }
+        expect(list_definition[:description]).to include("`foo_resources`").and include("`foo_resource_schema`")
+      end
+
+      it "rewrites sibling-tool references inside input schema property descriptions" do
+        list_definition = provider.tool_definitions(context).find { |d| d[:name] == "foo_list" }
+        resource_property = list_definition[:inputSchema][:properties][:resource]
+
+        expect(resource_property[:description]).to include("`foo_resources`")
       end
     end
   end

@@ -32,9 +32,11 @@ class McpToolkit::Authority::RegistryToolProvider
   end
 
   # The four static generic tool definitions (context-independent), each advertised
-  # under its PREFIXED name so `tools/list` shows the host's namespaced names.
+  # under its PREFIXED name so `tools/list` shows the host's namespaced names. The
+  # prefix is threaded into each definition so sibling-tool references in the
+  # description / input schema name the prefixed tools too (see Tools::Base.definition).
   def tool_definitions(_context)
-    TOOLS.map { |base_name, klass| klass.definition.merge(name: prefixed(base_name)) }
+    TOOLS.map { |_base_name, klass| klass.definition(name_prefix: prefix) }
   end
 
   # A tool instance bound to this provider's config, or nil for an unknown name.
@@ -52,11 +54,6 @@ class McpToolkit::Authority::RegistryToolProvider
   # The host's generic tool-name prefix (empty by default).
   def prefix
     @config.generic_tool_name_prefix.to_s
-  end
-
-  # The advertised name for a base tool: the configured prefix followed by the base.
-  def prefixed(base_name)
-    "#{prefix}#{base_name}"
   end
 
   # Recovers the base tool name from an advertised name by stripping the configured

@@ -24,6 +24,14 @@
 # resource descriptor, gate a superuser-only resource, gate the per-resource
 # scope, and (for get/list) require a selected account.
 class McpToolkit::Authority::Tools::Base
+  # Backticked sibling-tool references inside a description or input schema
+  # (e.g. "use the `resources` tool"). Rewritten by .definition to carry the
+  # host's configured generic tool-name prefix, so prose always names the tools
+  # exactly as they appear in this server's `tools/list` — a client reading
+  # "use the `resources` tool" on a server that advertises `crm_resources`
+  # would otherwise be pointed at a tool that does not exist.
+  GENERIC_TOOL_REFERENCES = /`(resource_schema|resources|list|get)`/
+
   class << self
     attr_reader :_description, :_input_schema
 
@@ -43,9 +51,31 @@ class McpToolkit::Authority::Tools::Base
     end
 
     # The static tool definition returned by the provider's `tool_definitions`
-    # (part of `tools/list`). Generic and context-independent.
-    def definition
-      { name: tool_name, description: _description, inputSchema: input_schema }
+    # (part of `tools/list`). Generic and context-independent. `name_prefix` is
+    # the host's `config.generic_tool_name_prefix`: it prefixes the advertised
+    # name AND is threaded through every sibling-tool reference in the
+    # description / input schema (see GENERIC_TOOL_REFERENCES).
+    def definition(name_prefix: "")
+      {
+        name: "#{name_prefix}#{tool_name}",
+        description: with_prefixed_references(_description, name_prefix),
+        inputSchema: with_prefixed_references(input_schema, name_prefix)
+      }
+    end
+
+    private
+
+    # Rewrites backticked generic-tool references to their prefixed names,
+    # walking nested schema hashes/arrays for their description strings.
+    def with_prefixed_references(node, name_prefix)
+      return node if name_prefix.to_s.empty?
+
+      case node
+      when String then node.gsub(GENERIC_TOOL_REFERENCES) { "`#{name_prefix}#{Regexp.last_match(1)}`" }
+      when Hash then node.transform_values { |value| with_prefixed_references(value, name_prefix) }
+      when Array then node.map { |value| with_prefixed_references(value, name_prefix) }
+      else node
+      end
     end
   end
 
