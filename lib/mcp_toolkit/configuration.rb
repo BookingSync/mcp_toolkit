@@ -216,6 +216,17 @@ class McpToolkit::Configuration
   # @return [Symbol] :created_at or :primary_key
   attr_accessor :non_numeric_pk_order
 
+  # Per-column-type overrides for the operator sets advertised by
+  # `resource_schema` and enforced by the list executor, merged over
+  # McpToolkit::Filtering::OPERATORS_BY_TYPE. Lets a host preserve an EXISTING
+  # operator contract exactly — both the schema bytes and which conditions are
+  # accepted — e.g. `{ text: %w[eq in], date: %w[eq in] }` for a pre-gem
+  # endpoint that never offered comparisons on those types. Empty by default
+  # (the gem's own sets apply).
+  #
+  # @return [Hash{Symbol => Array<String>}]
+  attr_accessor :filter_operator_overrides
+
   # --- protocol / transport --------------------------------------------------
 
   # @return [String, nil] protocol version to pin on the underlying MCP::Server.
@@ -405,6 +416,7 @@ class McpToolkit::Configuration
     @sql_sanitizer = McpToolkit::SqlSanitizer.new
     @bare_filter_value_semantics = :tokenized
     @non_numeric_pk_order = :created_at
+    @filter_operator_overrides = {}
   end
 
   # The authority transport's injection points all default to nil (a no-op): a

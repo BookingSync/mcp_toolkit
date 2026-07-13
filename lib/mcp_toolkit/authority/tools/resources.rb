@@ -17,8 +17,9 @@ class McpToolkit::Authority::Tools::Resources < McpToolkit::Authority::Tools::Ba
     resource's attributes, relationships and filters.
   DESC
 
-  def call(context:, **extra)
-    reject_unknown_arguments!(extra.except(:account_id))
+  # Unlike get / resource_schema (strict kwargs pre-gem), the pre-gem resources
+  # tool tolerated ANY extra argument — so this one stays tolerant.
+  def call(context:, **_args)
     {
       resources: visible_resources(context).map do |resource|
         {

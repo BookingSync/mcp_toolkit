@@ -339,6 +339,37 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       end
     end
 
+    describe "config.filter_operator_overrides (pre-gem operator contract)" do
+      before { McpToolkit.config.filter_operator_overrides = { string: %w[eq in] } }
+
+      it "narrows the ENFORCED operator set for the overridden type" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { name: { op: "matches", value: "al" } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /not supported/)
+      end
+
+      it "keeps operators inside the overridden set working" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "in", value: "alpha" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "narrows the ADVERTISED operator set identically (schema and executor cannot disagree)" do
+        schema = McpToolkit::ResourceSchema.call(resource)
+        name_attribute = schema[:attributes].find { |a| a[:name] == :name }
+
+        expect(name_attribute[:operators]).to eq(%w[eq in])
+      end
+
+      it "leaves non-overridden types on the gem's own sets" do
+        expect(McpToolkit::Filtering.operators_for(:integer)).to eq(%w[eq not_eq gt gteq lt lteq])
+      end
+    end
+
     describe "operator support for column types outside the operator table" do
       let(:uuid_widget_model) do
         Class.new do

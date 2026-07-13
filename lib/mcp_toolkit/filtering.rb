@@ -115,7 +115,7 @@ module McpToolkit::Filtering
     raise McpToolkit::Errors::InvalidParams, "a filter operator is required" if operator.empty?
 
     type = column_type(relation, column)
-    validate_operator!(operator, type, column)
+    validate_operator!(operator, type, column, config:)
 
     raw = fetch(condition, :value)
     relation.where(predicate_for(relation, column, operator, raw, config:))
@@ -136,21 +136,24 @@ module McpToolkit::Filtering
     model.columns_hash[column.to_s]&.type
   end
 
-  # Operators an attribute of the given column type accepts. `[]` for an
-  # attribute with no backing column (which cannot be filtered with operators).
-  def self.operators_for(type)
+  # Operators an attribute of the given column type accepts — the single source
+  # for both the schema's advertisement and the executor's enforcement, so the
+  # two can never disagree. `[]` for an attribute with no backing column (which
+  # cannot be filtered with operators). A host can override sets per type via
+  # config.filter_operator_overrides (e.g. to preserve a pre-gem contract).
+  def self.operators_for(type, config: McpToolkit.config)
     return [] if type.nil?
 
-    OPERATORS_BY_TYPE.fetch(type, DEFAULT_OPERATORS)
+    config.filter_operator_overrides.fetch(type) { OPERATORS_BY_TYPE.fetch(type, DEFAULT_OPERATORS) }
   end
 
-  def self.validate_operator!(operator, type, column)
+  def self.validate_operator!(operator, type, column, config:)
     if type.nil?
       raise McpToolkit::Errors::InvalidParams,
             "'#{column}' cannot be filtered with operators"
     end
 
-    allowed = operators_for(type)
+    allowed = operators_for(type, config:)
     return if allowed.include?(operator)
 
     raise McpToolkit::Errors::InvalidParams,

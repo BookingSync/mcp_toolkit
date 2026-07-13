@@ -76,10 +76,16 @@ the pre-gem contract:
   (`get`, `list`, `resource_schema`, `resources`) and string/text operator
   lists keep the pre-gem order (`eq, in, not_eq, matches, does_not_match`) —
   JSON arrays are ordered, so byte-diffing clients see no reorder.
-- `get` / `resource_schema` / `resources` reject arguments outside their input
-  schema with InvalidParams instead of silently ignoring them (pre-gem parity;
-  `account_id` is always tolerated — the transport consumes it). `list` keeps
-  accepting extra top-level arguments: they are the resource-specific filters.
+- `get` / `resource_schema` reject arguments outside their input schema with
+  InvalidParams instead of silently ignoring them (pre-gem parity — they were
+  strict Ruby kwargs; `account_id` is always tolerated, the transport consumes
+  it). `resources` and `list` stay tolerant of extra arguments, also matching
+  the pre-gem contract (`list`'s extras are the resource-specific filters).
+- `config.filter_operator_overrides` — per-column-type overrides for the
+  operator sets advertised by `resource_schema` AND enforced by the executor
+  (single source, they cannot disagree), so a host can preserve a pre-gem
+  operator contract exactly (e.g. `{ text: %w[eq in], date: %w[eq in] }`).
+  Empty by default: the gem's own sets apply.
 - A companion key whose value the executor would SKIP (an empty string under
   `:tokenized` semantics) no longer satisfies a `filter_requirements` pairing —
   the foreign key is rejected rather than applied alone (type-ambiguous).
@@ -91,8 +97,11 @@ the pre-gem contract:
 
 - `{ op: "in", value: "a,b" }` now splits the comma-separated string into an
   IN set (previously `in` matched the literal string `'a,b'` as a single
-  element; only `eq` split). The split is what the operator means; revert by
-  passing an Array with a single element if the literal is intended.
+  element; only `eq` split). Comma-separated STRING ELEMENTS inside an Array
+  value are split the same way — under the tokenized operator grammar there is
+  no way to express a literal comma inside an IN element; a literal
+  comma-containing match is expressed as a bare equality value (which hosts on
+  `:literal` semantics match verbatim).
 
 ### Fixed
 

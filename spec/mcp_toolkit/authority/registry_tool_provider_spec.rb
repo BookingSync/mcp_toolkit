@@ -184,6 +184,12 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
       )
     end
 
+    it "tolerates ANY extra argument (unlike get/resource_schema — pre-gem parity)" do
+      result = resources.call(context:, bogus: 1, account_id: 99)
+
+      expect(result[:resources]).not_to be_empty
+    end
+
     context "with an unfilterable resource carrying a usage note" do
       before do
         s = widget_serializer
