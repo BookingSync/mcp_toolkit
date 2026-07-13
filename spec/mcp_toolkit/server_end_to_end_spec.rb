@@ -252,12 +252,18 @@ RSpec.describe "Server end-to-end (tools/call)" do
       expect(payload["widgets"].map { |w| w["id"] }).to eq([1, 2])
     end
 
-    it "is reachable by any valid token (discovery: resources)" do
+    it "is reachable by any valid token and returns the enriched discovery entries" do
       server = McpToolkit::Server.build(server_context: { bearer_token: "forwarded-token", header_account_id: nil })
       request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "resources", arguments: {} } }
       response = JSON.parse(server.handle_json(JSON.generate(request)))
 
       expect(response.dig("result", "isError")).to be_falsey
+      payload = JSON.parse(response.dig("result", "content", 0, "text"))
+      # Satellite discovery mirrors the authority contract: name + description +
+      # filterable (false here — :widgets declares no filters), note omitted when unset.
+      expect(payload["resources"]).to include(
+        "name" => "widgets", "description" => "Widgets.", "filterable" => false
+      )
     end
   end
 end
