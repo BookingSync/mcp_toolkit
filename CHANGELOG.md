@@ -25,12 +25,20 @@ gem replaced.
 - A JSON null filter value filters for `IS NULL` (like the `"null"` string
   token). Previously it was silently ignored.
 
+All of the above applies to the SATELLITE generic tools too: they share the
+executors and schema builder, so their `resources` output gains
+`filterable`/`note`, their `resource_schema` output gains `resource_filters`,
+and their descriptions document the same filter grammar.
+
 ### Fixed
 
 - Generic tool descriptions and input schemas rewrite sibling-tool references
   (e.g. "use the `resources` tool") to carry `config.generic_tool_name_prefix`,
   so a host that namespaces its generic tools no longer serves prose pointing
-  at unprefixed tool names that do not exist on its server.
+  at unprefixed tool names that do not exist on its server. The gateway
+  aggregator applies the same rewrite with the upstream namespace, so a proxied
+  `<app>__list` no longer points a client at the upstream's bare tool names
+  (`McpToolkit::ToolReferenceRewriter`).
 - `eq` / `in` operator conditions against `"null"` / null render `IS NULL`
   instead of `IN (NULL)`, which matches no rows in SQL.
 - `eq` / `in` operator conditions accept an Array `value` (previously
@@ -40,6 +48,29 @@ gem replaced.
   skip rows that share a timestamp (e.g. bulk inserts).
 - An Array mixing `{ op:, value: }` conditions with bare values is rejected
   with InvalidParams instead of being misread as bare equality values.
+- One resource's failing lazy `filterable` resolution (e.g. a transient DB
+  error inside a host-supplied callable) no longer fails the whole `resources`
+  discovery index: the `filterable` key is omitted for that resource and the
+  unresolved source is retried on the next read instead of permanently and
+  silently resolving the allowlist to `{}`.
+
+### Changed (explicit over silent — each previously returned a wrong or empty result)
+
+- IN-set elements must be non-null scalars: a nil, Hash or nested-Array element
+  inside an Array filter value raises InvalidParams (previously a Hash element
+  raised a TypeError at query time and a nil element rendered the
+  never-matching `IN (..., NULL)`). The `"null"` token is NOT resolved inside a
+  set — SQL `IN` cannot match NULL — so a null-or-nothing condition is
+  expressed as the filter's single scalar value.
+- A null value with an operator other than `eq` / `in` / `not_eq` (comparisons,
+  `matches` / `does_not_match`) raises InvalidParams; a comparison or LIKE
+  against NULL can never match a row (previously `matches` with a JSON null
+  matched every row via `LIKE '%%'`, and comparisons silently matched nothing).
+- An op-less Hash as a bare filter value raises InvalidParams (previously it
+  reached the database as a malformed condition).
+- `{ op: "eq", value: "" }` matches rows whose value IS the empty string
+  (previously it matched nothing via an empty IN set). A bare `""` filter value
+  still means "no filter".
 
 ## [0.4.0] - 2026-07-06
 

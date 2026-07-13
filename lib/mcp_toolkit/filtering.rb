@@ -7,6 +7,9 @@
 #     - a comma-separated string becomes an IN lookup: filter: { status: "a,b" }
 #     - an Array of scalars becomes an IN lookup too:  filter: { status: ["a", "b"] }
 #     - the string "null" (or a JSON null) matches NULL rows: filter: { canceled_at: "null" }
+#       (as a SCALAR value only — inside an IN set, elements must be non-null
+#       scalars and "null" stays a literal string, because SQL `IN` cannot match
+#       NULL; a null-or-nothing condition is expressed as a scalar filter)
 #   * an { op:, value: } HASH filters with an operator: filter: { price: { op: "gteq", value: 100 } }
 #   * an ARRAY of those hashes ANDs them (ranges):
 #       filter: { price: [{ op: "gteq", value: 100 }, { op: "lt", value: 200 }] }
@@ -36,6 +39,12 @@ module McpToolkit::Filtering
   AREL_PREDICATIONS = %w[eq not_eq gt gteq lt lteq in matches does_not_match].freeze
 
   NULL_TOKEN = "null"
+
+  # Operators for which a null value is meaningful: eq/in render `IS NULL`,
+  # not_eq renders `IS NOT NULL`. Every other operator rejects null explicitly —
+  # a comparison or LIKE against NULL can never match a row in SQL, so passing
+  # one through silently would return a wrong (empty) result.
+  NULL_ACCEPTING_OPERATORS = %w[eq in not_eq].freeze
 
   # @param relation the already account-scoped relation
   # @param column [Symbol] the backing DB column (already resolved from the allowlist)
@@ -147,9 +156,16 @@ module McpToolkit::Filtering
   # `eq` / `in` against a (possibly comma-separated string or Array) value
   # becomes an IN set. `matches` / `does_not_match` wrap the value in `%...%`
   # with LIKE wildcards escaped so they match literally. `null` / a JSON null
-  # => nil for every operator.
+  # => nil for the NULL_ACCEPTING_OPERATORS, rejected for every other operator.
   def self.normalize_value(operator, raw, config:)
-    return nil if raw.nil? || raw.to_s == NULL_TOKEN
+    if raw.nil? || raw.to_s == NULL_TOKEN
+      unless NULL_ACCEPTING_OPERATORS.include?(operator)
+        raise McpToolkit::Errors::InvalidParams,
+              "'#{operator}' does not accept a null value " \
+              "(only #{NULL_ACCEPTING_OPERATORS.join("/")} do)"
+      end
+      return nil
+    end
 
     case operator
     when "eq", "in"
@@ -164,19 +180,41 @@ module McpToolkit::Filtering
 
   # A bare (non-operator) filter value resolved for equality: `"null"` / nil =>
   # nil (matches NULL rows); a comma-separated string => its parts (IN); an
-  # Array => an IN set, each element resolved the same way with comma-splits
-  # flattened in.
+  # Array => an IN set of non-null scalars (see .equality_value_set). Any other
+  # non-scalar (an op-less Hash) is rejected — passed through it would reach the
+  # database as a malformed condition.
   def self.equality_value(value)
-    if value.is_a?(Array)
-      return value.flat_map do |element|
-        resolved = equality_value(element)
-        resolved.is_a?(Array) ? resolved : [resolved]
-      end
+    return equality_value_set(value) if value.is_a?(Array)
+    return nil if value.nil? || value.to_s == NULL_TOKEN
+
+    if value.is_a?(Hash)
+      raise McpToolkit::Errors::InvalidParams,
+            "unsupported filter value; use a bare scalar, an array of scalars, " \
+            "or { op:, value: } condition(s)"
     end
-    return nil if value.to_s == NULL_TOKEN
 
     str = value.to_s
     str.include?(",") ? str.split(",") : value
+  end
+
+  # Resolves an Array filter value into a flat IN set. Elements must be non-null
+  # scalars (comma-separated strings are split in); nil / nested Array / Hash
+  # elements are rejected explicitly — SQL `IN` cannot match NULL (Arel renders
+  # a nil element as the never-matching `IN (..., NULL)`), and a non-scalar
+  # element is a malformed condition either way. The `"null"` token is NOT
+  # resolved inside a set for the same reason: it stays a literal string, and a
+  # null-or-nothing condition is expressed as a scalar filter value instead.
+  def self.equality_value_set(values)
+    values.flat_map do |element|
+      if element.nil? || element.is_a?(Array) || element.is_a?(Hash)
+        raise McpToolkit::Errors::InvalidParams,
+              "an IN-set filter must contain only non-null scalar values; " \
+              "to match NULL rows pass \"null\" as the filter's single value"
+      end
+
+      str = element.to_s
+      str.include?(",") ? str.split(",") : [element]
+    end
   end
 
   # Portable representation of an operator predicate, applied by the in-memory

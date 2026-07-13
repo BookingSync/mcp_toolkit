@@ -7,11 +7,16 @@ class McpToolkit::Tools::ResourceSchema < McpToolkit::Tools::Base
   description <<~DESC.strip
     Describe a single read-only resource in detail. Pass the resource name as `resource` (use
     the `resources` tool to discover names). Returns:
-      - attributes: every field in the response, each with its `type` and a value `format` hint
+      - attributes: every field in the response, each with its `type`, a value `format` hint,
+        whether it is `filterable`, and the filter `operators` it accepts
       - relationships: associated resources emitted in the record's `links`; each names the
         `target_resource` it resolves to (callable via `list`/`get`)
       - standard_filters: ids, updated_since, limit, offset (accepted by the `list` tool)
-      - filters: the per-attribute equality filter keys the `list` tool accepts
+      - filters: the per-attribute equality/operator filter keys the `list` tool accepts in
+        its `filter` argument
+      - resource_filters: resource-specific filters, if any — each is passed as a TOP-LEVEL
+        argument of the `list` tool (NOT inside `filter`), e.g. { "resource": "...",
+        "<name>": <value> }
     The `attributes` and `relationships` names are also the valid values for the `fields` sparse
     fieldset argument on `get` / `list`. Call this before `list` to learn a resource's shape.
   DESC

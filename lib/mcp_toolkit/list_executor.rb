@@ -70,16 +70,12 @@ class McpToolkit::ListExecutor
   # (a non-numeric PK does not sort meaningfully) with the primary key as a
   # tiebreaker — rows bulk-inserted in one transaction share a `created_at`, and
   # without a total order offset pagination could duplicate or skip rows.
+  # `numeric_primary_key?` returning false guarantees the model exposes a
+  # non-nil primary key, so it can be read directly here.
   def apply_order(relation)
     return relation.order(:id) if numeric_primary_key?
 
-    relation.order(:created_at, primary_key_column)
-  end
-
-  def primary_key_column
-    model = resource.model
-    pk = model.respond_to?(:primary_key) ? model.primary_key : nil
-    (pk || "id").to_sym
+    relation.order(:created_at, resource.model.primary_key.to_sym)
   end
 
   def numeric_primary_key?

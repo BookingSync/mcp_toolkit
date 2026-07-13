@@ -123,7 +123,10 @@ class FakeRelation
   end
 
   # Translates a `%escaped%` LIKE pattern into a case-insensitive substring test.
+  # A nil pattern matches nothing (`LIKE NULL` in SQL), not everything.
   def like_match?(actual, pattern)
+    return false if pattern.nil?
+
     inner = pattern.to_s.gsub(/\A%|%\z/, "").gsub(/\\([\\%_])/, '\1')
     actual.to_s.downcase.include?(inner.downcase)
   end

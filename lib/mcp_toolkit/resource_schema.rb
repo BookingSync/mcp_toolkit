@@ -101,9 +101,9 @@ class McpToolkit::ResourceSchema
     resource.custom_filters.each_value.map do |custom_filter|
       {
         name: custom_filter.name.to_s,
-        type: custom_filter.type.to_s,
+        type: custom_filter.type&.to_s,
         description: custom_filter.description
-      }
+      }.compact
     end
   end
 

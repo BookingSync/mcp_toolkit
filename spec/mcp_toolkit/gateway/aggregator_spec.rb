@@ -23,6 +23,43 @@ RSpec.describe McpToolkit::Gateway::Aggregator do
       ])
     end
 
+    context "when the upstream prose references its own generic tools" do
+      let(:tools) do
+        [{
+          "name" => "list",
+          "description" => "Fetch records. Use the `resources` tool to discover resources and " \
+                           "`resource_schema` to learn a shape.",
+          "inputSchema" => {
+            "type" => "object",
+            "properties" => {
+              "resource" => { "type" => "string", "description" => "Use the `resources` tool." }
+            },
+            "required" => ["resource"]
+          }
+        }]
+      end
+
+      # A proxied `list` telling a client to "use the `resources` tool" points at a
+      # tool that does not exist on the gateway — only `notifications__resources` does.
+      it "rewrites backticked tool references to the namespaced names, in prose AND input schema" do
+        definition = aggregator.tool_definitions.first
+
+        expect(definition["name"]).to eq("notifications__list")
+        expect(definition["description"])
+          .to include("`notifications__resources`").and include("`notifications__resource_schema`")
+        expect(definition["inputSchema"]["properties"]["resource"]["description"])
+          .to include("`notifications__resources`")
+        expect(definition["inputSchema"]["required"]).to eq(["resource"])
+      end
+
+      it "does not mutate the upstream's original definition" do
+        aggregator.tool_definitions
+
+        expect(tools.first["description"]).to include("`resources`")
+        expect(tools.first["name"]).to eq("list")
+      end
+    end
+
     it "forwards the bearer token to the client (used on a cache miss)" do
       aggregator.tool_definitions(bearer_token: "tok-9")
 

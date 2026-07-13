@@ -190,7 +190,7 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
       end
 
       it "surfaces filterable: false and the note at browse time" do
-        result = provider.find("resources").call(context:)
+        result = resources.call(context:)
 
         expect(result[:resources]).to include(
           name: "raw_events",
@@ -198,6 +198,32 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
           filterable: false,
           note: "Internal debugging data; do not interpret without domain knowledge."
         )
+      end
+    end
+
+    context "with a resource whose lazy filterable source raises" do
+      before do
+        s = widget_serializer
+        m = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:flaky) do
+            model m
+            serializer s
+            description "Flaky."
+            filterable { raise "boom: db unavailable" }
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "keeps the whole discovery index available, omitting only that resource's filterable key" do
+        result = resources.call(context:)
+        flaky_entry = result[:resources].find { |resource| resource[:name] == "flaky" }
+        widgets_entry = result[:resources].find { |resource| resource[:name] == "widgets" }
+
+        expect(flaky_entry).to eq(name: "flaky", description: "Flaky.")
+        expect(widgets_entry).to include(filterable: true)
       end
     end
 
@@ -220,11 +246,32 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
       end
 
       it "counts the custom filter as filterable" do
-        result = provider.find("resources").call(context:)
+        result = resources.call(context:)
         entry = result[:resources].find { |resource| resource[:name] == "custom_only" }
 
         expect(entry).to include(filterable: true)
       end
+    end
+  end
+
+  describe "the advertised filter grammar (discoverability contract)" do
+    it "documents the operator payload shape, NULL token, IN sets and resource_filters in the `list` description" do
+      description = provider.tool_definitions(context).find { |d| d[:name] == "list" }[:description]
+
+      expect(description).to include('{ "op": <operator>, "value": <value> }')
+        .and include('"gteq"')
+        .and include('"null"')
+        .and include("array of scalars")
+        .and include("resource_filters")
+    end
+
+    it "documents resource_filters and the filterable/note keys in the discovery tools' descriptions" do
+      definitions = provider.tool_definitions(context)
+      schema_description = definitions.find { |d| d[:name] == "resource_schema" }[:description]
+      resources_description = definitions.find { |d| d[:name] == "resources" }[:description]
+
+      expect(schema_description).to include("resource_filters").and include("TOP-LEVEL")
+      expect(resources_description).to include("`filterable`").and include("`note`")
     end
   end
 
@@ -348,9 +395,15 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
         provider.tool_definitions(context).each do |definition|
           expect(definition[:description]).not_to match(/`(resources|resource_schema|get|list)`/)
         end
+      end
 
-        list_definition = provider.tool_definitions(context).find { |d| d[:name] == "foo_list" }
-        expect(list_definition[:description]).to include("`foo_resources`").and include("`foo_resource_schema`")
+      it "rewrites every tool's cross-references, not just one tool's" do
+        by_name = provider.tool_definitions(context).to_h { |d| [d[:name], d[:description]] }
+
+        expect(by_name["foo_list"]).to include("`foo_resources`").and include("`foo_resource_schema`")
+        expect(by_name["foo_get"]).to include("`foo_resources`")
+        expect(by_name["foo_resources"]).to include("`foo_resource_schema`")
+        expect(by_name["foo_resource_schema"]).to include("`foo_resources`").and include("`foo_list`")
       end
 
       it "rewrites sibling-tool references inside input schema property descriptions" do
@@ -358,6 +411,15 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
         resource_property = list_definition[:inputSchema][:properties][:resource]
 
         expect(resource_property[:description]).to include("`foo_resources`")
+      end
+
+      it "preserves every non-prose input schema value through the rewrite walk" do
+        list_schema = provider.tool_definitions(context).find { |d| d[:name] == "foo_list" }[:inputSchema]
+
+        expect(list_schema[:required]).to eq(["resource"])
+        expect(list_schema[:properties][:fields][:type]).to eq(%w[array string])
+        expect(list_schema[:properties][:filter][:additionalProperties]).to be(true)
+        expect(list_schema[:type]).to eq("object")
       end
     end
   end

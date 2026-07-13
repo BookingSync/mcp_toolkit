@@ -119,11 +119,20 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       end.to raise_error(McpToolkit::Errors::InvalidParams, /only \{ op:, value: \} conditions or only bare values/)
     end
 
+    it "rejects a mixed Array regardless of element order (bare value first)" do
+      expect do
+        described_class.call(
+          resource:, scope_root: account,
+          params: { filter: { price: [200, { op: "gteq", value: 100 }] } }
+        )
+      end.to raise_error(McpToolkit::Errors::InvalidParams, /only \{ op:, value: \} conditions or only bare values/)
+    end
+
     describe "NULL filtering (API v3 parity)" do
       let(:rows) do
         [
           FakeRecord.new(id: 1, name: "alpha", booking_id: 10, price: 100),
-          FakeRecord.new(id: 2, name: "beta", booking_id: nil, price: 200)
+          FakeRecord.new(id: 2, name: nil, booking_id: nil, price: 200)
         ]
       end
 
@@ -167,6 +176,89 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         )
 
         expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "resolves { op: \"in\", value: \"null\" } to IS NULL (not IN (NULL))" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "in", value: "null" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "resolves an { op: \"eq\" } condition with a JSON null value to IS NULL" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: { op: "eq", value: nil } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "keeps the \"null\" token LITERAL inside an IN set (SQL IN cannot match NULL)" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: %w[alpha null] } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "rejects a nil element inside an IN set with InvalidParams" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { filter: { name: ["alpha", nil] } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /non-null scalar/)
+      end
+
+      it "rejects a null value for `matches` with InvalidParams (LIKE NULL can never match)" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { name: { op: "matches", value: "null" } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /does not accept a null value/)
+      end
+
+      it "rejects a null value for a comparison operator with InvalidParams" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { price: { op: "gt", value: "null" } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /does not accept a null value/)
+      end
+    end
+
+    describe "empty-string and malformed filter values" do
+      let(:rows) do
+        [
+          FakeRecord.new(id: 1, name: "alpha", booking_id: 10, price: 100),
+          FakeRecord.new(id: 2, name: "", booking_id: 20, price: 200)
+        ]
+      end
+
+      it "matches rows whose value IS the empty string for { op: \"eq\", value: \"\" }" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "eq", value: "" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "rejects a Hash element inside an IN set with InvalidParams (was a query-time TypeError)" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { filter: { name: [{ foo: 1 }] } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /non-null scalar/)
+      end
+
+      it "rejects a nested Array element inside an IN set with InvalidParams" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { price: [[{ op: "eq", value: 100 }]] } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /non-null scalar/)
+      end
+
+      it "rejects an op-less Hash as a bare filter value with InvalidParams" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { filter: { name: { foo: 1 } } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /unsupported filter value/)
       end
     end
 
@@ -267,12 +359,12 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         end
       end
 
-      def register_resource_with_pk_type(pk_type)
+      def register_resource_with_pk_type(pk_type, pk_name: "id")
         model = Class.new do
           define_singleton_method(:columns_hash) do
-            { "id" => FakeRelation::Column.new(pk_type), "created_at" => FakeRelation::Column.new(:datetime) }
+            { pk_name => FakeRelation::Column.new(pk_type), "created_at" => FakeRelation::Column.new(:datetime) }
           end
-          def self.primary_key = "id"
+          define_singleton_method(:primary_key) { pk_name }
           def self.model_name = FakeModelName.new("things")
         end
         serializer = Class.new(McpToolkit::Serializer::Base) do
@@ -308,6 +400,14 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         # transaction share a created_at, and offset pagination over a partial
         # order can duplicate or skip rows across pages.
         expect(rel.ordered_by).to eq(%i[created_at id])
+      end
+
+      it "reads the tiebreaker column off the model's primary key, not a hardcoded :id" do
+        rel = register_resource_with_pk_type(:uuid, pk_name: "uuid")
+
+        described_class.call(resource: McpToolkit.registry.fetch("things"), scope_root: account, params: {})
+
+        expect(rel.ordered_by).to eq(%i[created_at uuid])
       end
     end
 

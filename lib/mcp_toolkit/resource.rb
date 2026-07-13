@@ -229,16 +229,19 @@ class McpToolkit::Resource
 
   private
 
-  # Resolves a lazily-provided filterable source (a callable) exactly once — on the
-  # first `filterable_columns` / `filterable_keys` read — then drops it, so later
-  # reads are pure Hash access. This is what keeps a DB-derived map (e.g.
-  # `Model.column_names`) out of registration/boot time.
+  # Resolves a lazily-provided filterable source (a callable) on the first
+  # SUCCESSFUL `filterable_columns` / `filterable_keys` read — then drops it, so
+  # later reads are pure Hash access. This is what keeps a DB-derived map (e.g.
+  # `Model.column_names`) out of registration/boot time. The source is cleared
+  # only AFTER it returns: a raising callable (a transient DB hiccup) stays
+  # registered and is retried on the next read, instead of permanently and
+  # silently resolving the allowlist to `{}`.
   def resolve_filterable_source!
     return unless @filterable_source
 
-    source = @filterable_source
+    resolved = @filterable_source.call || {}
     @filterable_source = nil
-    merge_filterable!(source.call || {})
+    merge_filterable!(resolved)
   end
 
   def merge_filterable!(mapping)

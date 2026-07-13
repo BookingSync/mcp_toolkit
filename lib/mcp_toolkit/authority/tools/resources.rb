@@ -39,9 +39,15 @@ class McpToolkit::Authority::Tools::Resources < McpToolkit::Authority::Tools::Ba
 
   # Whether the resource can be filtered at all — via the generic allowlist OR a
   # resource-specific custom filter. Reading `filterable_columns` resolves a
-  # lazily-declared allowlist, which is safe here: a tool call runs long after
-  # boot, with the database available.
+  # lazily-declared allowlist, which may run host code (e.g. a DB-backed column
+  # list). One resource's failing resolution must not take down the whole
+  # discovery index — this is the tool every session calls first — so a raise
+  # degrades to nil (the `filterable` key is omitted for that resource) and the
+  # unresolved source is retried on the next read (see Resource#filterable).
   def filterable?(resource)
     resource.filterable_columns.any? || resource.custom_filters.any?
+  rescue StandardError => e
+    config.logger&.warn("mcp_toolkit: filterable resolution failed for #{resource.name}: #{e.message}")
+    nil
   end
 end

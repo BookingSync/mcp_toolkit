@@ -105,11 +105,17 @@ class McpToolkit::Gateway::Aggregator
     end
   end
 
-  # Re-keys an upstream tool definition into the gateway's aggregate namespace.
+  # Re-keys an upstream tool definition into the gateway's aggregate namespace,
+  # rewriting backticked generic-tool references in its prose too — a proxied
+  # `list` saying "use the `resources` tool" must point at `<app>__resources`,
+  # the only name that exists on THIS server's tools/list. The rewrite returns a
+  # fresh structure, so the upstream's (possibly cached) definition is never
+  # mutated.
   def namespaced(upstream, definition)
-    definition = definition.dup
-    definition["name"] = upstream.name_for(definition["name"])
-    definition
+    rewritten = McpToolkit::ToolReferenceRewriter.rewrite(definition, upstream.name_for(""))
+    rewritten = rewritten.dup if rewritten.equal?(definition)
+    rewritten["name"] = upstream.name_for(definition["name"])
+    rewritten
   end
 
   def cache
