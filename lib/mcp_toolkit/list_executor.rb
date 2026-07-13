@@ -110,13 +110,8 @@ class McpToolkit::ListExecutor
     validate_filter_keys!(filter, mapping)
     validate_filter_companions!(filter)
 
-    literal = McpToolkit.config.bare_filter_value_semantics == :literal
     filter.each do |request_key, value|
-      # Under :tokenized semantics an empty string means "no filter" (a JSON
-      # null still flows through as an IS NULL filter, like the "null" token —
-      # see McpToolkit::Filtering); under :literal every value reaches the
-      # WHERE clause verbatim.
-      next if value == "" && !literal
+      next if skipped_filter_value?(value)
 
       column = mapping[request_key.to_sym]
       relation = McpToolkit::Filtering.apply(relation, column, value)
@@ -124,18 +119,29 @@ class McpToolkit::ListExecutor
     relation
   end
 
+  # Under :tokenized semantics an empty string means "no filter" (a JSON null
+  # still flows through as an IS NULL filter, like the "null" token — see
+  # McpToolkit::Filtering); under :literal every value reaches the WHERE clause
+  # verbatim.
+  def skipped_filter_value?(value)
+    value == "" && McpToolkit.config.bare_filter_value_semantics != :literal
+  end
+
   # A filter key may declare a companion key it cannot be used without (e.g. a
   # polymorphic foreign key is type-ambiguous without its `*_type`) — see
   # Resource#filter_requirements. Rejected up front rather than producing a
-  # subtly wrong WHERE.
+  # subtly wrong WHERE. A key whose value the apply loop will SKIP counts as
+  # not provided — a skipped ("" under :tokenized) companion must not satisfy
+  # the requirement, or the FK would be applied alone: exactly the
+  # type-ambiguous WHERE the requirement exists to prevent.
   def validate_filter_companions!(filter)
     requirements = resource.filter_requirements
     return if requirements.empty?
 
-    keys = filter.keys.map(&:to_sym)
+    provided = filter.reject { |_key, value| skipped_filter_value?(value) }.keys.map(&:to_sym)
     requirements.each do |key, required|
-      next unless keys.include?(key)
-      next if keys.include?(required)
+      next unless provided.include?(key)
+      next if provided.include?(required)
 
       raise McpToolkit::Errors::InvalidParams,
             "filter attribute #{key} requires #{required} to also be provided"

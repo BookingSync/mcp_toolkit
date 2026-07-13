@@ -67,10 +67,10 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
   end
 
   describe "#tool_definitions" do
-    it "returns the four static generic tool definitions" do
+    it "returns the four generic tool definitions in the pre-gem (alphabetical) order" do
       names = provider.tool_definitions(context).map { |definition| definition[:name] }
 
-      expect(names).to contain_exactly("resources", "resource_schema", "get", "list")
+      expect(names).to eq(%w[get list resource_schema resources])
     end
 
     it "gives every definition a name, description and inputSchema (the tools/list shape)" do
@@ -131,6 +131,17 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
     it "requires the resource argument" do
       expect { get.call(context:, resource: "", id: 1) }
         .to raise_error(McpToolkit::Protocol::InvalidParams, /resource is required/)
+    end
+
+    it "rejects arguments outside the input schema instead of silently ignoring them (pre-gem parity)" do
+      expect { get.call(context:, resource: "widgets", id: 1, bogus: true) }
+        .to raise_error(McpToolkit::Protocol::InvalidParams, /unknown argument\(s\): bogus/)
+    end
+
+    it "tolerates the transport-level account_id selector" do
+      result = get.call(context:, resource: "widgets", id: 1, account_id: 99)
+
+      expect(result).to include(id: 1)
     end
   end
 
@@ -265,6 +276,26 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
         .and include("resource_filters")
     end
 
+    it "embeds the exact tokenized grammar bullet (the substitution anchor for :literal hosts)" do
+      list_class = McpToolkit::Authority::Tools::List
+
+      expect(list_class.description).to include(list_class::BARE_VALUE_GRAMMAR[:tokenized])
+    end
+
+    context "when the host configures :literal bare-value semantics" do
+      before { McpToolkit.config.bare_filter_value_semantics = :literal }
+
+      # Served docs must describe the semantics the host actually configured —
+      # a client following tokenization advice on a :literal host would send
+      # comma/"null" filters that silently match nothing.
+      it "serves the literal bare-value grammar in the `list` description" do
+        description = provider.tool_definitions(context).find { |d| d[:name] == "list" }[:description]
+
+        expect(description).to include("LITERALLY")
+        expect(description).not_to include('"booked,canceled"')
+      end
+    end
+
     it "documents resource_filters and the filterable/note keys in the discovery tools' descriptions" do
       definitions = provider.tool_definitions(context)
       schema_description = definitions.find { |d| d[:name] == "resource_schema" }[:description]
@@ -285,6 +316,11 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
 
       expect(schema[:name]).to eq("widgets")
       expect(schema[:attributes].map { |attribute| attribute[:name] }).to include(:booking_id)
+    end
+
+    it "rejects arguments outside the input schema (pre-gem parity)" do
+      expect { resource_schema.call(context:, resource: "widgets", bogus: 1) }
+        .to raise_error(McpToolkit::Protocol::InvalidParams, /unknown argument\(s\): bogus/)
     end
   end
 

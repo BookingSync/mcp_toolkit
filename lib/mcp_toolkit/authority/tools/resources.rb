@@ -17,7 +17,8 @@ class McpToolkit::Authority::Tools::Resources < McpToolkit::Authority::Tools::Ba
     resource's attributes, relationships and filters.
   DESC
 
-  def call(context:, **_args)
+  def call(context:, **extra)
+    reject_unknown_arguments!(extra.except(:account_id))
     {
       resources: visible_resources(context).map do |resource|
         {

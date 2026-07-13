@@ -99,13 +99,16 @@ class McpToolkit::ResourceSchema
   # passed as TOP-LEVEL params of the `list` tool (NOT inside `filter`), each
   # applied by a host-supplied block. Surfaced with name/type/description so a
   # client can discover them; `[]` for a resource that declares none.
+  # Entries keep nil type/description keys (rather than compacting) — the
+  # pre-gem contract emitted them, and an always-present shape is easier for a
+  # client to consume.
   def resource_filters
     resource.custom_filters.each_value.map do |custom_filter|
       {
         name: custom_filter.name.to_s,
         type: custom_filter.type&.to_s,
         description: custom_filter.description
-      }.compact
+      }
     end
   end
 
@@ -147,7 +150,7 @@ class McpToolkit::ResourceSchema
     return unless relationship
 
     example = { relationship[:filter][:keys].first => 1 }
-    example[relationship[:filter][:requires]] = "..." if relationship[:filter][:requires]
+    example[relationship[:filter][:requires]] = "User" if relationship[:filter][:requires]
     example
   end
 

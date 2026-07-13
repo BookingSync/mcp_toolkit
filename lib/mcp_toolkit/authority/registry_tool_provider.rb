@@ -20,11 +20,13 @@ class McpToolkit::Authority::RegistryToolProvider
   # actually advertised in `tools/list` and matched in `tools/call` is this base
   # name PREFIXED with `config.generic_tool_name_prefix` (empty by default, so the
   # bare base name), letting a host namespace its generic tools.
+  # Alphabetical by base name — the order tools/list advertises them in
+  # (matches the pre-gem contract adopting hosts' clients observed).
   TOOLS = {
-    "resources" => McpToolkit::Authority::Tools::Resources,
-    "resource_schema" => McpToolkit::Authority::Tools::ResourceSchema,
     "get" => McpToolkit::Authority::Tools::Get,
-    "list" => McpToolkit::Authority::Tools::List
+    "list" => McpToolkit::Authority::Tools::List,
+    "resource_schema" => McpToolkit::Authority::Tools::ResourceSchema,
+    "resources" => McpToolkit::Authority::Tools::Resources
   }.freeze
 
   def initialize(config:)
@@ -36,7 +38,7 @@ class McpToolkit::Authority::RegistryToolProvider
   # prefix is threaded into each definition so sibling-tool references in the
   # description / input schema name the prefixed tools too (see Tools::Base.definition).
   def tool_definitions(_context)
-    TOOLS.map { |_base_name, klass| klass.definition(name_prefix: prefix) }
+    TOOLS.map { |_base_name, klass| klass.definition(name_prefix: prefix, config: @config) }
   end
 
   # A tool instance bound to this provider's config, or nil for an unknown name.

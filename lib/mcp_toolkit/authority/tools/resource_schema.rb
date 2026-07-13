@@ -41,7 +41,8 @@ class McpToolkit::Authority::Tools::ResourceSchema < McpToolkit::Authority::Tool
     }
   )
 
-  def call(context:, resource: nil, **_args)
+  def call(context:, resource: nil, **extra)
+    reject_unknown_arguments!(extra.except(:account_id))
     descriptor = resolve_descriptor(resource)
     ensure_resource_accessible!(descriptor, context)
     ensure_scope!(descriptor, context)

@@ -326,6 +326,17 @@ RSpec.describe "Registry + executors + serializer (data path)" do
 
         expect(result[:widgets].map { |w| w[:id] }).to eq([1])
       end
+
+      it "rejects a companion whose value would be SKIPPED (\"\" under :tokenized) — no bypass" do
+        expect do
+          described_class.call(
+            resource: poly_resource, scope_root: account, params: { filter: { booking_id: 10, name: "" } }
+          )
+        end.to raise_error(
+          McpToolkit::Errors::InvalidParams,
+          "filter attribute booking_id requires name to also be provided"
+        )
+      end
     end
 
     describe "operator support for column types outside the operator table" do
@@ -728,7 +739,8 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       id = schema[:attributes].find { |a| a[:name] == :id }
 
       expect(booking[:operators]).to eq(%w[eq not_eq gt gteq lt lteq])
-      expect(name[:operators]).to eq(%w[eq not_eq in matches does_not_match])
+      # Pre-gem contract order (JSON arrays are ordered; byte-diffing clients see reorders).
+      expect(name[:operators]).to eq(%w[eq in not_eq matches does_not_match])
       # A non-filterable attribute advertises an empty operator set.
       expect(id[:operators]).to eq([])
     end
@@ -775,7 +787,10 @@ RSpec.describe "Registry + executors + serializer (data path)" do
             model model
             serializer serializer
             description "Widgets with a filterable relationship."
-            filterable booking_id: :booking_id, booking: :booking_id
+            # The requirement's companion must itself be filterable (see
+            # Resource#filter_requirements) — here booking_type is aliased to a
+            # backing column so the advertised pair is actually acceptable.
+            filterable booking_id: :booking_id, booking: :booking_id, booking_type: :name
             filter_requirements booking_id: :booking_type
             scope { |_root| rel }
           end
@@ -794,10 +809,10 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         )
       end
 
-      it "includes a relationship example carrying the required companion key" do
+      it "includes a relationship example carrying the required companion key (pre-gem sample value)" do
         examples = described_class.call(McpToolkit.registry.fetch("rel_widgets"))[:filter_examples]
 
-        expect(examples).to include(booking_id: 1, booking_type: "...")
+        expect(examples).to include(booking_id: 1, booking_type: "User")
       end
     end
 

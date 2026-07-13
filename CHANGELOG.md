@@ -68,6 +68,31 @@ the pre-gem contract:
   "cannot be filtered with operators", and `date` columns accept `in` again.
 - The `list` tools' input schemas declare `additionalProperties: true`
   explicitly (resource-specific filters arrive as top-level arguments).
+- The authority `list` tool's served description states the bare-value grammar
+  the host ACTUALLY configured: under `:literal` semantics the comma/`"null"`
+  tokenization bullet is replaced by the literal-matching one, so served docs
+  never advertise filters that would silently match nothing.
+- The authority tools are advertised in alphabetical base-name order
+  (`get`, `list`, `resource_schema`, `resources`) and string/text operator
+  lists keep the pre-gem order (`eq, in, not_eq, matches, does_not_match`) —
+  JSON arrays are ordered, so byte-diffing clients see no reorder.
+- `get` / `resource_schema` / `resources` reject arguments outside their input
+  schema with InvalidParams instead of silently ignoring them (pre-gem parity;
+  `account_id` is always tolerated — the transport consumes it). `list` keeps
+  accepting extra top-level arguments: they are the resource-specific filters.
+- A companion key whose value the executor would SKIP (an empty string under
+  `:tokenized` semantics) no longer satisfies a `filter_requirements` pairing —
+  the foreign key is rejected rather than applied alone (type-ambiguous).
+- `resource_filters` entries keep nil `type`/`description` keys (pre-gem
+  shape) instead of compacting them; the relationship `filter_examples`
+  companion sample value is `"User"` (pre-gem sample) rather than `"..."`.
+
+### Known operator-path delta (documented, not reverted)
+
+- `{ op: "in", value: "a,b" }` now splits the comma-separated string into an
+  IN set (previously `in` matched the literal string `'a,b'` as a single
+  element; only `eq` split). The split is what the operator means; revert by
+  passing an Array with a single element if the literal is intended.
 
 ### Fixed
 

@@ -31,8 +31,8 @@ module McpToolkit::Filtering
     decimal: %w[eq not_eq gt gteq lt lteq].freeze,
     datetime: %w[eq not_eq gt gteq lt lteq].freeze,
     date: %w[eq not_eq gt gteq lt lteq in].freeze,
-    string: %w[eq not_eq in matches does_not_match].freeze,
-    text: %w[eq not_eq in matches does_not_match].freeze,
+    string: %w[eq in not_eq matches does_not_match].freeze,
+    text: %w[eq in not_eq matches does_not_match].freeze,
     boolean: %w[eq not_eq].freeze
   }.freeze
 

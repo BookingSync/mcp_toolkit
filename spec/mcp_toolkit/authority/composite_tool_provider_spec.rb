@@ -17,7 +17,7 @@ RSpec.describe McpToolkit::Authority::CompositeToolProvider do
     it "concatenates every provider's definitions in registration order" do
       names = composite.tool_definitions(context).map { |definition| definition[:name] }
 
-      expect(names).to eq(%w[resources resource_schema get list paper_trail_versions])
+      expect(names).to eq(%w[get list resource_schema resources paper_trail_versions])
     end
   end
 

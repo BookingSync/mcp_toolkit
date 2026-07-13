@@ -204,10 +204,12 @@ class McpToolkit::Resource
   #
   # The list executor rejects a filter using the key without its companion, and
   # `resource_schema` surfaces the requirement (`relationships[].filter.requires`)
-  # so a client can discover it. Like `filterable`, accepts a Hash (merged now)
-  # OR a callable returning one (resolved lazily on first successful read, then
-  # memoized) so a host can derive the map without touching the DB at boot.
-  # Read with no arg.
+  # so a client can discover it. The companion key MUST itself be declared
+  # `filterable` — otherwise the requirement is unsatisfiable (the executor
+  # rejects the companion as an unknown key) while the schema still advertises
+  # it. Like `filterable`, accepts a Hash (merged now) OR a callable returning
+  # one (resolved lazily on first successful read, then memoized) so a host can
+  # derive the map without touching the DB at boot. Read with no arg.
   def filter_requirements(mapping = nil, &block)
     source = block || mapping
     if source.nil?

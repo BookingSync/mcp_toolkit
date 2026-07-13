@@ -7,6 +7,35 @@
 # custom filters, pagination, and sparse fieldsets are all handled by the reused
 # McpToolkit::ListExecutor.
 class McpToolkit::Authority::Tools::List < McpToolkit::Authority::Tools::Base
+  # The bare-value grammar bullet, per config.bare_filter_value_semantics: the
+  # served description must state the semantics the host ACTUALLY configured —
+  # advertising comma/"null" tokenization to clients of a :literal host would
+  # send them filters that silently match nothing. The :tokenized text is the
+  # exact bullet embedded in the static description below (spec-pinned), so
+  # .description_text can swap it by plain substring substitution; both use
+  # `<<-` (no dedent) to carry the description's rendered 2-space indentation.
+  BARE_VALUE_GRAMMAR = {
+    tokenized: <<-TEXT.rstrip,
+  - A bare value matches by equality. A comma-separated string or an array of scalars
+    matches ANY of the values (IN), e.g. { "status": "booked,canceled" } or
+    { "status": ["booked", "canceled"] }. The string "null" (or a JSON null) matches
+    records where the value is NULL.
+    TEXT
+    literal: <<-TEXT.rstrip
+  - A bare value matches by equality, LITERALLY: a comma-separated string is a single
+    value and the string "null" is the literal string. A JSON null matches records
+    where the value is NULL. An array of scalars matches ANY of its values (IN).
+    TEXT
+  }.freeze
+
+  # Swaps the bare-value bullet for the host's configured semantics; the rest
+  # of the description is mode-independent.
+  def self.description_text(config)
+    return _description unless config && config.bare_filter_value_semantics == :literal
+
+    _description.sub(BARE_VALUE_GRAMMAR[:tokenized], BARE_VALUE_GRAMMAR[:literal])
+  end
+
   tool_name "list"
   description <<~DESC.strip
     Fetch a paginated list of records from a read-only resource. Pass the resource name as
