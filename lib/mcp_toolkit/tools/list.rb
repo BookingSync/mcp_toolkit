@@ -27,6 +27,9 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
         { "price": { "op": "gteq", "value": 100 } }. An array of conditions ANDs them into a
         range: { "price": [{ "op": "gteq", "value": 100 }, { "op": "lt", "value": 200 }] }.
         Each attribute's supported operators are listed in `resource_schema`.
+      - Some filter keys require a companion key (e.g. a polymorphic id and its type) —
+        `resource_schema` advertises these under a relationship's `filter.requires`; pass
+        both keys together.
 
     Resource-specific filters:
       - Some resources accept additional filters advertised in `resource_schema` under
@@ -77,7 +80,10 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
                      "resource's `resource_schema` for valid attribute and relationship names."
       }
     },
-    required: ["resource"]
+    required: ["resource"],
+    # Resource-specific filters (resource_schema's `resource_filters`) arrive as
+    # top-level arguments, so the schema must not advertise a closed shape.
+    additionalProperties: true
   )
 
   def self.call(server_context:, resource: nil, account_id: nil, **params)

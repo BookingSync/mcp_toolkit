@@ -15,9 +15,10 @@
 #       filter: { price: [{ op: "gteq", value: 100 }, { op: "lt", value: 200 }] }
 #
 # Supported operators (validated against the column's DB type):
-#   eq, not_eq, gt, gteq, lt, lteq        — numeric / datetime columns
+#   eq, not_eq, gt, gteq, lt, lteq        — numeric / datetime columns (+ in for date)
 #   eq, not_eq, in, matches, does_not_match — string columns (matches => case-insensitive LIKE)
 #   eq, not_eq                            — boolean columns
+#   eq, in                                — any other column type (uuid, enum, jsonb, ...)
 #
 # Allowlist-safe: only the resource's declared `filterable` keys may be filtered,
 # each resolved to its backing column. Unknown keys are rejected upstream by the
@@ -29,11 +30,17 @@ module McpToolkit::Filtering
     float: %w[eq not_eq gt gteq lt lteq].freeze,
     decimal: %w[eq not_eq gt gteq lt lteq].freeze,
     datetime: %w[eq not_eq gt gteq lt lteq].freeze,
-    date: %w[eq not_eq gt gteq lt lteq].freeze,
+    date: %w[eq not_eq gt gteq lt lteq in].freeze,
     string: %w[eq not_eq in matches does_not_match].freeze,
     text: %w[eq not_eq in matches does_not_match].freeze,
     boolean: %w[eq not_eq].freeze
   }.freeze
+
+  # Operators for a column type OUTSIDE the table above (uuid, enum, jsonb,
+  # citext, ...): plain equality/IN still work on any column, so they stay
+  # available rather than turning "cannot be filtered with operators" — which
+  # also matches the API contract this replaces for adopting hosts.
+  DEFAULT_OPERATORS = %w[eq in].freeze
 
   # Operators that map straight onto an Arel predication method.
   AREL_PREDICATIONS = %w[eq not_eq gt gteq lt lteq in matches does_not_match].freeze
@@ -62,11 +69,24 @@ module McpToolkit::Filtering
       raise McpToolkit::Errors::InvalidParams,
             "a filter array must contain either only { op:, value: } conditions or only bare values"
     else
-      # Bare value(s): equality. A comma-separated string or an Array of scalars
-      # becomes an IN lookup, matching the implicit `eq` semantics; "null" / a
-      # JSON null matches NULL rows.
-      relation.where(column => equality_value(value))
+      # Bare value(s): equality. Under the default :tokenized semantics a
+      # comma-separated string or an Array of scalars becomes an IN lookup and
+      # "null" / a JSON null matches NULL rows; under :literal the value is
+      # handed to the WHERE clause verbatim (see
+      # Configuration#bare_filter_value_semantics).
+      relation.where(column => bare_value(value, config))
     end
+  end
+
+  def self.bare_value(value, config)
+    if value.is_a?(Hash)
+      raise McpToolkit::Errors::InvalidParams,
+            "unsupported filter value; use a bare scalar, an array of scalars, " \
+            "or { op:, value: } condition(s)"
+    end
+    return value if config.bare_filter_value_semantics == :literal
+
+    equality_value(value)
   end
 
   # A single operator-based condition, e.g. { op: "gt", value: 1000 }.
@@ -116,12 +136,21 @@ module McpToolkit::Filtering
     model.columns_hash[column.to_s]&.type
   end
 
+  # Operators an attribute of the given column type accepts. `[]` for an
+  # attribute with no backing column (which cannot be filtered with operators).
+  def self.operators_for(type)
+    return [] if type.nil?
+
+    OPERATORS_BY_TYPE.fetch(type, DEFAULT_OPERATORS)
+  end
+
   def self.validate_operator!(operator, type, column)
-    allowed = OPERATORS_BY_TYPE[type]
-    if allowed.nil?
+    if type.nil?
       raise McpToolkit::Errors::InvalidParams,
             "'#{column}' cannot be filtered with operators"
     end
+
+    allowed = operators_for(type)
     return if allowed.include?(operator)
 
     raise McpToolkit::Errors::InvalidParams,

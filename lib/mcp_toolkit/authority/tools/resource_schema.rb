@@ -21,6 +21,9 @@ class McpToolkit::Authority::Tools::ResourceSchema < McpToolkit::Authority::Tool
       - resource_filters: resource-specific filters, if any — each is passed as a TOP-LEVEL
         argument of the `list` tool (NOT inside `filter`), e.g. { "resource": "...",
         "<name>": <value> }
+      - filter_examples: ready-to-use `filter` payloads for this resource
+    A relationship's `filter` block lists the keys that filter by it; when it names a
+    `requires` key (e.g. a polymorphic id needing its type), pass BOTH keys together.
     The `attributes` and `relationships` names are also the valid values for the `fields` sparse
     fieldset argument on `get` / `list`. Call this before `list` to learn a resource's shape.
   DESC

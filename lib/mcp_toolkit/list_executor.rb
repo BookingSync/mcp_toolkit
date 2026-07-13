@@ -66,16 +66,20 @@ class McpToolkit::ListExecutor
     relation
   end
 
-  # Order by `id` when the primary key is numeric; otherwise by `created_at`
-  # (a non-numeric PK does not sort meaningfully) with the primary key as a
-  # tiebreaker — rows bulk-inserted in one transaction share a `created_at`, and
-  # without a total order offset pagination could duplicate or skip rows.
-  # `numeric_primary_key?` returning false guarantees the model exposes a
-  # non-nil primary key, so it can be read directly here.
+  # Order by `id` when the primary key is numeric; otherwise per
+  # `config.non_numeric_pk_order`: `created_at` with the primary key as a
+  # tiebreaker (default — rows bulk-inserted in one transaction share a
+  # `created_at`, and without a total order offset pagination could duplicate
+  # or skip rows), or the primary key alone for a host preserving a pre-gem
+  # order-by-id contract. `numeric_primary_key?` returning false guarantees the
+  # model exposes a non-nil primary key, so it can be read directly here.
   def apply_order(relation)
     return relation.order(:id) if numeric_primary_key?
 
-    relation.order(:created_at, resource.model.primary_key.to_sym)
+    pk = resource.model.primary_key.to_sym
+    return relation.order(pk) if McpToolkit.config.non_numeric_pk_order == :primary_key
+
+    relation.order(:created_at, pk)
   end
 
   def numeric_primary_key?
@@ -104,16 +108,38 @@ class McpToolkit::ListExecutor
 
     mapping = resource.filterable_columns
     validate_filter_keys!(filter, mapping)
+    validate_filter_companions!(filter)
 
+    literal = McpToolkit.config.bare_filter_value_semantics == :literal
     filter.each do |request_key, value|
-      # A JSON null flows through as an IS NULL filter (like the "null" string
-      # token — see McpToolkit::Filtering); only an empty string means "no filter".
-      next if value == ""
+      # Under :tokenized semantics an empty string means "no filter" (a JSON
+      # null still flows through as an IS NULL filter, like the "null" token —
+      # see McpToolkit::Filtering); under :literal every value reaches the
+      # WHERE clause verbatim.
+      next if value == "" && !literal
 
       column = mapping[request_key.to_sym]
       relation = McpToolkit::Filtering.apply(relation, column, value)
     end
     relation
+  end
+
+  # A filter key may declare a companion key it cannot be used without (e.g. a
+  # polymorphic foreign key is type-ambiguous without its `*_type`) — see
+  # Resource#filter_requirements. Rejected up front rather than producing a
+  # subtly wrong WHERE.
+  def validate_filter_companions!(filter)
+    requirements = resource.filter_requirements
+    return if requirements.empty?
+
+    keys = filter.keys.map(&:to_sym)
+    requirements.each do |key, required|
+      next unless keys.include?(key)
+      next if keys.include?(required)
+
+      raise McpToolkit::Errors::InvalidParams,
+            "filter attribute #{key} requires #{required} to also be provided"
+    end
   end
 
   def validate_filter_keys!(filter, mapping)

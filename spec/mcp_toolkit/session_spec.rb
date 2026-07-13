@@ -31,7 +31,7 @@ RSpec.describe McpToolkit::Session do
       McpToolkit.config.session_ttl = 100
 
       expect(McpToolkit.config.cache_store).to receive(:write).with(
-        "#{described_class::CACHE_KEY_PREFIX}#{session.id}", anything, expires_in: 100
+        "mcp_toolkit:session:#{session.id}", anything, expires_in: 100
       ).and_call_original
 
       described_class.find(session.id)
@@ -68,7 +68,7 @@ RSpec.describe McpToolkit::Session do
       # Simulate a pre-`data` cache row: only created_at, no :data key.
       id = SecureRandom.uuid
       McpToolkit.config.cache_store.write(
-        "#{described_class::CACHE_KEY_PREFIX}#{id}", { created_at: Time.now.to_i }
+        "mcp_toolkit:session:#{id}", { created_at: Time.now.to_i }
       )
 
       expect(described_class.find(id).data).to eq({})
@@ -79,6 +79,50 @@ RSpec.describe McpToolkit::Session do
 
       described_class.find(created.id) # slides TTL, rewrites the row
       expect(described_class.find(created.id).data).to eq(token_id: 7)
+    end
+  end
+
+  describe "host-compat session store (key prefix + payload codec)" do
+    # A host migrating a PRE-GEM session store keeps its historical namespace and
+    # wire format, so old and new application versions share live sessions during
+    # a rolling deploy.
+    before do
+      McpToolkit.configure do |c|
+        c.session_key_prefix = "legacy:session:"
+        c.session_payload_dumper = ->(data) { { legacy_token_id: data[:token_id] } }
+        c.session_payload_loader = ->(stored) { { token_id: stored[:legacy_token_id] } }
+      end
+    end
+
+    it "stores under the configured prefix in the configured wire format" do
+      created = described_class.create!(data: { token_id: 42 })
+
+      raw = McpToolkit.config.cache_store.read("legacy:session:#{created.id}")
+      expect(raw).to eq(legacy_token_id: 42)
+    end
+
+    it "finds a session written by a PRE-GEM instance (the legacy format)" do
+      id = SecureRandom.uuid
+      McpToolkit.config.cache_store.write("legacy:session:#{id}", { legacy_token_id: 7 })
+
+      expect(described_class.find(id).data).to eq(token_id: 7)
+    end
+
+    it "re-writes the RAW legacy payload on the sliding-TTL bump (old instances keep reading it)" do
+      id = SecureRandom.uuid
+      McpToolkit.config.cache_store.write("legacy:session:#{id}", { legacy_token_id: 7 })
+
+      described_class.find(id)
+
+      expect(McpToolkit.config.cache_store.read("legacy:session:#{id}")).to eq(legacy_token_id: 7)
+    end
+
+    it "deletes under the configured prefix" do
+      created = described_class.create!(data: { token_id: 42 })
+
+      described_class.delete(created.id)
+
+      expect(McpToolkit.config.cache_store.read("legacy:session:#{created.id}")).to be_nil
     end
   end
 end

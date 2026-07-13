@@ -419,6 +419,8 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
         expect(list_schema[:required]).to eq(["resource"])
         expect(list_schema[:properties][:fields][:type]).to eq(%w[array string])
         expect(list_schema[:properties][:filter][:additionalProperties]).to be(true)
+        # Top-level custom (resource-specific) filters arrive as extra arguments.
+        expect(list_schema[:additionalProperties]).to be(true)
         expect(list_schema[:type]).to eq("object")
       end
     end

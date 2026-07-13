@@ -126,6 +126,24 @@ class McpToolkit::Configuration
   # @return [Integer] session sliding-TTL in seconds.
   attr_accessor :session_ttl
 
+  # Cache-key namespace for stored sessions. Overridable so a host migrating an
+  # EXISTING session store into the gem can keep its historical namespace —
+  # old and new application versions then share live sessions during a rolling
+  # deploy instead of 404-ing each other's session ids.
+  #
+  # @return [String]
+  attr_accessor :session_key_prefix
+
+  # Optional codec pair for the STORED session payload, for hosts whose
+  # pre-gem sessions used a different wire format. `session_payload_dumper`
+  # receives the session's `data` hash and returns the hash to store;
+  # `session_payload_loader` receives a stored hash and returns the `data`
+  # hash. Both nil (the default) = the gem's native `{ created_at:, data: }`
+  # format. Set BOTH together so every instance reads what any instance wrote.
+  #
+  # @return [Proc, nil]
+  attr_accessor :session_payload_dumper, :session_payload_loader
+
   # --- rate limiting ---------------------------------------------------------
 
   # The built-in per-principal request cap enforced by the authority transport
@@ -168,6 +186,35 @@ class McpToolkit::Configuration
   #
   # @return [#sanitize_sql_like]
   attr_accessor :sql_sanitizer
+
+  # How a BARE (non-operator) filter value is interpreted by the list executor:
+  #
+  #   :tokenized (default) — a comma-separated string becomes an IN set, the
+  #     "null" token (and a JSON null) matches NULL rows, an Array of non-null
+  #     scalars is an IN set (nil/Hash/nested-Array elements rejected), and an
+  #     empty string means "no filter".
+  #   :literal — the value is handed to the WHERE clause verbatim (an op-less
+  #     Hash is still rejected). This preserves an EXISTING API contract for a
+  #     host whose pre-gem endpoint matched bare values literally: "a,b" is one
+  #     literal string, "null" is the literal string, "" matches empty-string
+  #     rows, an Array (including nil elements) gets the adapter's native IN /
+  #     OR-IS-NULL handling.
+  #
+  # Operator conditions ({ op:, value: }) behave identically in both modes.
+  #
+  # @return [Symbol] :tokenized or :literal
+  attr_accessor :bare_filter_value_semantics
+
+  # Default ordering for a resource whose primary key is NON-numeric (numeric
+  # PKs always order by :id):
+  #
+  #   :created_at (default) — ORDER BY created_at, <pk> (chronological pages
+  #     with a total-order tiebreaker).
+  #   :primary_key — ORDER BY <pk> only. Preserves an EXISTING API contract for
+  #     a host whose pre-gem endpoint ordered every list by id.
+  #
+  # @return [Symbol] :created_at or :primary_key
+  attr_accessor :non_numeric_pk_order
 
   # --- protocol / transport --------------------------------------------------
 
@@ -327,9 +374,7 @@ class McpToolkit::Configuration
     @token_authenticator = nil
 
     @cache_store = ActiveSupport::Cache::MemoryStore.new
-    @session_ttl = 3600 # 1 hour
-
-    @sql_sanitizer = McpToolkit::SqlSanitizer.new
+    initialize_data_path_defaults
 
     @protocol_version = nil
     @supported_protocol_versions = McpToolkit::Protocol::SUPPORTED_VERSIONS
@@ -346,6 +391,20 @@ class McpToolkit::Configuration
 
     @registry = McpToolkit::Registry.new
     @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
+  end
+
+  # Session-store and list-executor defaults: the gem's native session format /
+  # namespace, and the :tokenized / :created_at data-path semantics (a host
+  # preserving a pre-gem contract overrides these — see each accessor's docs).
+  def initialize_data_path_defaults
+    @session_ttl = 3600 # 1 hour
+    @session_key_prefix = "mcp_toolkit:session:"
+    @session_payload_dumper = nil
+    @session_payload_loader = nil
+
+    @sql_sanitizer = McpToolkit::SqlSanitizer.new
+    @bare_filter_value_semantics = :tokenized
+    @non_numeric_pk_order = :created_at
   end
 
   # The authority transport's injection points all default to nil (a no-op): a

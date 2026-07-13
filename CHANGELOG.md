@@ -30,6 +30,45 @@ executors and schema builder, so their `resources` output gains
 `filterable`/`note`, their `resource_schema` output gains `resource_filters`,
 and their descriptions document the same filter grammar.
 
+### Host-compatibility seams (full parity with a pre-gem API contract)
+
+For a host migrating an EXISTING MCP endpoint onto the gem, whose clients hold
+the pre-gem contract:
+
+- `config.session_key_prefix` + `config.session_payload_dumper` /
+  `session_payload_loader` — keep the pre-gem session cache namespace and wire
+  format, so old and new application versions SHARE live sessions during a
+  rolling deploy (no forced client re-initialization). The sliding-TTL bump
+  re-writes the raw stored payload untouched.
+- `config.bare_filter_value_semantics = :literal` — bare filter values reach
+  the WHERE clause verbatim (`"a,b"` is one literal string, `"null"` is the
+  literal string, `""` matches empty-string rows, an Array — including nil
+  elements — gets the adapter's native IN / OR-IS-NULL handling). The default
+  `:tokenized` keeps the gem's comma/IN/`"null"`-token grammar. Operator
+  conditions are identical in both modes.
+- `config.non_numeric_pk_order = :primary_key` — lists of non-numeric-PK
+  resources order by the primary key alone, preserving a pre-gem
+  ORDER BY id contract. The default `:created_at` keeps chronological pages
+  with the PK tiebreaker.
+- `Resource#filter_requirements` — declares companion-key requirements (e.g. a
+  polymorphic foreign key that is type-ambiguous without its `*_type`): the
+  list executor rejects the key without its companion ("filter attribute X
+  requires Y to also be provided") and `resource_schema` advertises the
+  requirement, restoring safe polymorphic-FK filtering instead of dropping the
+  key from the allowlist. Accepts a Hash or a lazily-resolved callable, like
+  `filterable`.
+- `resource_schema` output restores the remaining pre-gem keys: top-level
+  `sparse_fieldsets: true` and `filter_examples` (ready-to-use payloads built
+  from the resource's own attributes/relationships), `relationships[].resource`
+  (nullable; `target_resource` remains as the resolved alias) and
+  `relationships[].filter` (`keys` / `type` / `operators` / `requires`).
+  Top-level nil keys are compacted (a nil `note` is omitted again).
+- Operator conditions work on ANY column type: types outside the operator
+  table (uuid, enum, jsonb, ...) accept `eq` / `in` instead of failing with
+  "cannot be filtered with operators", and `date` columns accept `in` again.
+- The `list` tools' input schemas declare `additionalProperties: true`
+  explicitly (resource-specific filters arrive as top-level arguments).
+
 ### Fixed
 
 - Generic tool descriptions and input schemas rewrite sibling-tool references

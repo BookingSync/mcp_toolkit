@@ -41,10 +41,12 @@ class McpToolkit::ResourceSchema
       note: resource.note,
       attributes:,
       relationships:,
+      resource_filters:,
       standard_filters: STANDARD_FILTERS,
-      filters:,
-      resource_filters:
-    }
+      sparse_fieldsets: true,
+      filter_examples:,
+      filters:
+    }.compact
   end
 
   private
@@ -52,7 +54,7 @@ class McpToolkit::ResourceSchema
   attr_reader :resource, :model, :registry
 
   def attributes
-    resource.attribute_names.map { |name| attribute_schema(name) }
+    @attributes ||= resource.attribute_names.map { |name| attribute_schema(name) }
   end
 
   def attribute_schema(name)
@@ -63,18 +65,18 @@ class McpToolkit::ResourceSchema
       format: type ? TYPE_FORMATS[type] : nil,
       filterable: filterable_column_for(name).present?,
       operators: operators_for(name)
-    }.compact
+    }
   end
 
   # The filter operators an attribute accepts, derived from the backing column's
-  # type via McpToolkit::Filtering::OPERATORS_BY_TYPE. `[]` for a non-filterable
-  # attribute (or one whose column type has no operator set) — self-describing so
-  # a client knows exactly which `{ op:, value: }` conditions `list` will accept.
+  # type via McpToolkit::Filtering.operators_for. `[]` for a non-filterable
+  # attribute (or one with no backing column) — self-describing so a client
+  # knows exactly which `{ op:, value: }` conditions `list` will accept.
   def operators_for(attribute_name)
     pair = filterable_column_for(attribute_name)
     return [] unless pair
 
-    McpToolkit::Filtering::OPERATORS_BY_TYPE.fetch(column_type(pair.last), [])
+    McpToolkit::Filtering.operators_for(column_type(pair.last))
   end
 
   # Per-attribute equality filters this resource accepts on the `list` tool's
@@ -107,6 +109,71 @@ class McpToolkit::ResourceSchema
     end
   end
 
+  # Ready-to-use `filter` payload examples built from this resource's own
+  # filterable attributes and relationships, so a client can copy a working
+  # shape instead of deriving it from the operator lists.
+  def filter_examples
+    [equality_example, comparison_example, range_example, relationship_example].compact
+  end
+
+  def equality_example
+    attribute = example_attributes.find { |candidate| candidate[:type] == "string" } || example_attributes.first
+    return unless attribute
+
+    { attribute[:name] => sample_value(attribute[:type]) }
+  end
+
+  def comparison_example
+    attribute = comparison_attribute
+    return unless attribute
+
+    { attribute[:name] => { op: "gt", value: sample_value(attribute[:type]) } }
+  end
+
+  def range_example
+    attribute = comparison_attribute
+    return unless attribute
+
+    {
+      attribute[:name] => [
+        { op: "gteq", value: sample_value(attribute[:type]) },
+        { op: "lt", value: sample_value(attribute[:type]) }
+      ]
+    }
+  end
+
+  def relationship_example
+    relationship = relationships.find { |candidate| candidate[:filter] }
+    return unless relationship
+
+    example = { relationship[:filter][:keys].first => 1 }
+    example[relationship[:filter][:requires]] = "..." if relationship[:filter][:requires]
+    example
+  end
+
+  def filterable_attributes
+    attributes.select { |attribute| attribute[:filterable] }
+  end
+
+  # `id` is filterable but uninteresting as an example (use the `ids` filter for that).
+  def example_attributes
+    filterable_attributes.reject { |attribute| attribute[:name] == :id }
+  end
+
+  def comparison_attribute
+    example_attributes.find { |attribute| attribute[:operators].include?("gt") }
+  end
+
+  def sample_value(type)
+    case type.to_s
+    when "integer" then 1
+    when "decimal", "float" then "100.0"
+    when "boolean" then true
+    when "datetime", "date" then "2026-01-01T00:00:00Z"
+    else "..."
+    end
+  end
+
   # Backing column for a serialized attribute that is also a filter key, if any.
   # A filter key may be a public alias (e.g. booking_id -> synced_booking_id) so
   # we match on either the request key or the column.
@@ -117,22 +184,46 @@ class McpToolkit::ResourceSchema
   end
 
   def relationships
-    resource.association_descriptors.map { |association| relationship_schema(association) }
+    @relationships ||= resource.association_descriptors.map { |association| relationship_schema(association) }
   end
 
-  # One relationship entry. Beyond the link key/kind/polymorphic flag it now also
-  # names the `target_resource` — the registered resource this link resolves to,
-  # callable via `list`/`get` — so e.g. a `scheduled_notifications.notification`
-  # link is discoverably the `notifications` resource rather than a name to guess.
-  # It is omitted (additive/backward-compatible) when the target can't be resolved
-  # (e.g. a polymorphic link).
+  # One relationship entry: the link key/kind/polymorphic flag, the registered
+  # resource the link resolves to — emitted BOTH as `resource` (nullable) and,
+  # when resolved, as `target_resource` (so e.g. a
+  # `scheduled_notifications.notification` link is discoverably the
+  # `notifications` resource rather than a name to guess) — and, when the
+  # link's foreign key is filterable, a `filter` block telling a client HOW to
+  # filter by the relationship (see #relationship_filter).
   def relationship_schema(association)
     target = target_resource_for(association)
-    {
+    schema = {
       name: association.links_key,
       kind: association.type.to_s,
       polymorphic: association.polymorphic || false,
-      target_resource: target&.name
+      resource: target&.name,
+      filter: relationship_filter(association.links_key)
+    }
+    schema[:target_resource] = target.name if target
+    schema
+  end
+
+  # How to filter by a relationship, when its foreign key is in the filter
+  # allowlist: the accepted request keys (the FK, plus the bare link name when
+  # aliased), the backing column's type, its operators, and — for a key that
+  # cannot be used alone (e.g. a polymorphic FK needing its `*_type`) — the
+  # companion key it `requires` (see Resource#filter_requirements).
+  def relationship_filter(name)
+    id_key = :"#{name}_id"
+    column = resource.filterable_columns[id_key]
+    return nil unless column
+
+    keys = [id_key]
+    keys << name.to_sym if resource.filterable_columns.key?(name.to_sym)
+    {
+      keys:,
+      type: column_type(column).to_s,
+      operators: operators_for(id_key),
+      requires: resource.filter_requirements[id_key]
     }.compact
   end
 
