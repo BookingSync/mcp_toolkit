@@ -42,6 +42,8 @@ class McpToolkit::Resource
     @superusers_only = false
     @filterable = {}
     @filterable_source = nil
+    @filter_requirements = {}
+    @filter_requirements_source = nil
     @custom_filters = {}
     @required_permissions_scope = nil
     @extras = {}
@@ -194,6 +196,35 @@ class McpToolkit::Resource
     filterable_columns.keys.sort
   end
 
+  # Declares companion-key requirements for filter keys: a request-facing key
+  # that is only valid when another key is passed alongside it (the canonical
+  # case is a polymorphic foreign key, type-ambiguous without its `*_type`):
+  #
+  #   filter_requirements created_by_id: :created_by_type
+  #
+  # The list executor rejects a filter using the key without its companion, and
+  # `resource_schema` surfaces the requirement (`relationships[].filter.requires`)
+  # so a client can discover it. The companion key MUST itself be declared
+  # `filterable` — otherwise the requirement is unsatisfiable (the executor
+  # rejects the companion as an unknown key) while the schema still advertises
+  # it. Like `filterable`, accepts a Hash (merged now) OR a callable returning
+  # one (resolved lazily on first successful read, then memoized) so a host can
+  # derive the map without touching the DB at boot. Read with no arg.
+  def filter_requirements(mapping = nil, &block)
+    source = block || mapping
+    if source.nil?
+      resolve_filter_requirements_source!
+      return @filter_requirements
+    end
+
+    if source.respond_to?(:call)
+      @filter_requirements_source = source
+    else
+      merge_filter_requirements!(source)
+    end
+    self
+  end
+
   # Request-facing filter key (symbol) => backing column (symbol). Consumed by
   # the list executor to build the WHERE clause.
   def filterable_columns
@@ -229,19 +260,37 @@ class McpToolkit::Resource
 
   private
 
-  # Resolves a lazily-provided filterable source (a callable) exactly once — on the
-  # first `filterable_columns` / `filterable_keys` read — then drops it, so later
-  # reads are pure Hash access. This is what keeps a DB-derived map (e.g.
-  # `Model.column_names`) out of registration/boot time.
+  # Resolves a lazily-provided filterable source (a callable) on the first
+  # SUCCESSFUL `filterable_columns` / `filterable_keys` read — then drops it, so
+  # later reads are pure Hash access. This is what keeps a DB-derived map (e.g.
+  # `Model.column_names`) out of registration/boot time. The source is cleared
+  # only AFTER it returns: a raising callable (a transient DB hiccup) stays
+  # registered and is retried on the next read, instead of permanently and
+  # silently resolving the allowlist to `{}`.
   def resolve_filterable_source!
     return unless @filterable_source
 
-    source = @filterable_source
+    resolved = @filterable_source.call || {}
     @filterable_source = nil
-    merge_filterable!(source.call || {})
+    merge_filterable!(resolved)
   end
 
   def merge_filterable!(mapping)
     mapping.each { |request_key, column| @filterable[request_key.to_sym] = column.to_sym }
+  end
+
+  # Same lazy-resolution contract as the filterable source: resolved on the
+  # first successful read, cleared only after the callable returns so a
+  # transient failure is retried rather than silently dropping the map.
+  def resolve_filter_requirements_source!
+    return unless @filter_requirements_source
+
+    resolved = @filter_requirements_source.call || {}
+    @filter_requirements_source = nil
+    merge_filter_requirements!(resolved)
+  end
+
+  def merge_filter_requirements!(mapping)
+    mapping.each { |key, required| @filter_requirements[key.to_sym] = required.to_sym }
   end
 end

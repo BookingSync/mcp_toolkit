@@ -31,7 +31,7 @@ RSpec.describe McpToolkit::Session do
       McpToolkit.config.session_ttl = 100
 
       expect(McpToolkit.config.cache_store).to receive(:write).with(
-        "#{described_class::CACHE_KEY_PREFIX}#{session.id}", anything, expires_in: 100
+        "mcp_toolkit:session:#{session.id}", anything, expires_in: 100
       ).and_call_original
 
       described_class.find(session.id)
@@ -68,7 +68,7 @@ RSpec.describe McpToolkit::Session do
       # Simulate a pre-`data` cache row: only created_at, no :data key.
       id = SecureRandom.uuid
       McpToolkit.config.cache_store.write(
-        "#{described_class::CACHE_KEY_PREFIX}#{id}", { created_at: Time.now.to_i }
+        "mcp_toolkit:session:#{id}", { created_at: Time.now.to_i }
       )
 
       expect(described_class.find(id).data).to eq({})
@@ -81,4 +81,5 @@ RSpec.describe McpToolkit::Session do
       expect(described_class.find(created.id).data).to eq(token_id: 7)
     end
   end
+
 end

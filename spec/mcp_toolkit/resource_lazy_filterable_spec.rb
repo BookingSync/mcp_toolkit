@@ -36,5 +36,23 @@ RSpec.describe McpToolkit::Resource do
 
       expect(resource.filterable_columns).to eq({})
     end
+
+    it "retries a raising callable on the next read instead of silently resolving to {}" do
+      attempts = 0
+      resource = described_class.new("widgets")
+      resource.filterable(lambda {
+        attempts += 1
+        raise "db unavailable" if attempts == 1
+
+        { color: :color }
+      })
+
+      # A transient failure (e.g. the DB briefly unreachable) must propagate,
+      # NOT permanently drop the allowlist — that would silently turn every
+      # declared filter into "unknown filter attribute" until process restart.
+      expect { resource.filterable_columns }.to raise_error(RuntimeError, "db unavailable")
+      expect(resource.filterable_columns).to eq(color: :color)
+      expect(attempts).to eq(2)
+    end
   end
 end

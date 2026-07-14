@@ -169,6 +169,94 @@ class McpToolkit::Configuration
   # @return [#sanitize_sql_like]
   attr_accessor :sql_sanitizer
 
+  # NOTE: (all data-path settings below): the list/get executors and the schema
+  # builder read the PROCESS-GLOBAL `McpToolkit.config` — a per-instance config
+  # bound to a provider affects tool prose only. Configure these globally.
+  #
+  # How a BARE (non-operator) filter value is interpreted by the list executor:
+  #
+  #   :tokenized (default) — a comma-separated string becomes an IN set, the
+  #     "null" token (and a JSON null) matches NULL rows, an Array of non-null
+  #     scalars is an IN set (nil/Hash/nested-Array elements rejected), and an
+  #     empty string means "no filter".
+  #   :literal — the value is handed to the WHERE clause verbatim (an op-less
+  #     Hash is still rejected). This preserves an EXISTING API contract for a
+  #     host whose pre-gem endpoint matched bare values literally: "a,b" is one
+  #     literal string, "null" is the literal string, "" matches empty-string
+  #     rows, an Array (including nil elements) gets the adapter's native IN /
+  #     OR-IS-NULL handling.
+  #
+  # Operator conditions ({ op:, value: }) behave identically in both modes.
+  #
+  # @return [Symbol] :tokenized or :literal
+  attr_accessor :bare_filter_value_semantics
+
+  # Default ordering for a resource whose primary key is NON-numeric (numeric
+  # PKs always order by :id):
+  #
+  #   :created_at (default) — ORDER BY created_at, <pk> (chronological pages
+  #     with a total-order tiebreaker).
+  #   :primary_key — ORDER BY <pk> only. Preserves an EXISTING API contract for
+  #     a host whose pre-gem endpoint ordered every list by id.
+  #
+  # @return [Symbol] :created_at or :primary_key
+  attr_accessor :non_numeric_pk_order
+
+  # Per-column-type overrides for the operator sets advertised by
+  # `resource_schema` and enforced by the list executor, merged over
+  # McpToolkit::Filtering::OPERATORS_BY_TYPE. Lets a host preserve an EXISTING
+  # operator contract exactly — both the schema bytes and which conditions are
+  # accepted — e.g. `{ text: %w[eq in], date: %w[eq in] }` for a pre-gem
+  # endpoint that never offered comparisons on those types. Empty by default
+  # (the gem's own sets apply).
+  #
+  # @return [Hash{Symbol => Array<String>}]
+  attr_reader :filter_operator_overrides
+
+  # Assigns per-type operator overrides, rejecting any operator the gem cannot
+  # safely dispatch. Only McpToolkit::Filtering::AREL_PREDICATIONS map onto an
+  # Arel predication that binds/quotes its value; anything else (e.g. "extract")
+  # would be public_send to an Arel attribute with the request value passed
+  # through VERBATIM — an SQL-injection surface. Fail fast at config time so a
+  # typo can never open that door at request time.
+  def filter_operator_overrides=(overrides)
+    overrides ||= {}
+    unless overrides.is_a?(Hash)
+      raise ArgumentError,
+            "filter_operator_overrides must be a Hash of { column_type => [operator, ...] }, " \
+            "got #{overrides.class}"
+    end
+
+    overrides.each do |type, operators|
+      unsupported = Array(operators).map(&:to_s) - McpToolkit::Filtering::AREL_PREDICATIONS
+      next if unsupported.empty?
+
+      raise ArgumentError,
+            "filter_operator_overrides[#{type.inspect}] has unsupported operator(s): " \
+            "#{unsupported.join(", ")}. Allowed: #{McpToolkit::Filtering::AREL_PREDICATIONS.join(", ")}."
+    end
+
+    @filter_operator_overrides = overrides
+  end
+
+  # Caps how many values an IN-set filter may resolve to, and how many operator
+  # conditions may be ANDed on a single attribute, so a valid token can't emit
+  # an unbounded IN clause / AND-chain (oversized SQL + Arel AST and expensive
+  # planning; rate limiting is opt-in via rate_limit_max_requests). Applies to
+  # the default :tokenized bare-value semantics and to { op:, value: }
+  # conditions. nil disables the cap.
+  #
+  # @return [Integer, nil]
+  attr_accessor :max_filter_values
+
+  # Caps how many JSON-RPC calls a single POST batch may carry on the authority
+  # transport. Rate limiting is per-HTTP-request, so an uncapped batch would let
+  # one request fan out unbounded work (N tool executions / N upstream calls)
+  # under a single rate-limit tick. nil disables the cap.
+  #
+  # @return [Integer, nil]
+  attr_accessor :max_batch_size
+
   # --- protocol / transport --------------------------------------------------
 
   # @return [String, nil] protocol version to pin on the underlying MCP::Server.
@@ -277,11 +365,31 @@ class McpToolkit::Configuration
   # where a tool object responds to `#required_permissions_scope` (String|nil, the
   # gem's scope gate) and `#call(context:, **arguments)` (returns Hash|String,
   # which the gem wraps into `{ content: [{ type: "text", text: }] }`). See
-  # McpToolkit::Tools::AuthorityBase for a base that satisfies this. nil = the host
-  # contributes no own tools (a pure gateway).
+  # McpToolkit::Tools::AuthorityBase for a base that satisfies this.
   #
-  # @return [#tool_definitions, #find, nil]
-  attr_accessor :tool_provider
+  # UNSET (the default), the provider is composed automatically: the generic
+  # RegistryToolProvider (bound to this config) first, then every entry of
+  # `extra_tool_providers` — so a host that only serves the generic tools plus
+  # its own bespoke ones needs no provider plumbing at all. Assign explicitly to
+  # take full control of the catalog.
+  #
+  # @return [#tool_definitions, #find]
+  attr_writer :tool_provider
+
+  def tool_provider
+    @tool_provider || composed_tool_provider
+  end
+
+  # Additional tool providers (or bare TOOL classes, auto-wrapped in a
+  # SingleToolProvider) composed AFTER the generic Registry-backed tools when
+  # `tool_provider` is not explicitly assigned. The registry provider is always
+  # first, so a generic tool name resolves to it; extras only answer their own
+  # names.
+  #
+  #   config.extra_tool_providers = [MyApp::Tools::AuditLog]
+  #
+  # @return [Array<#tool_definitions, Class>]
+  attr_accessor :extra_tool_providers
 
   # --- generic tool naming ---------------------------------------------------
 
@@ -327,9 +435,7 @@ class McpToolkit::Configuration
     @token_authenticator = nil
 
     @cache_store = ActiveSupport::Cache::MemoryStore.new
-    @session_ttl = 3600 # 1 hour
-
-    @sql_sanitizer = McpToolkit::SqlSanitizer.new
+    initialize_data_path_defaults
 
     @protocol_version = nil
     @supported_protocol_versions = McpToolkit::Protocol::SUPPORTED_VERSIONS
@@ -348,6 +454,40 @@ class McpToolkit::Configuration
     @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
   end
 
+  # Session-TTL and list-executor defaults: the :tokenized / :created_at
+  # data-path semantics (a host preserving a pre-gem contract overrides these —
+  # see each accessor's docs).
+  def initialize_data_path_defaults
+    @session_ttl = 3600 # 1 hour
+
+    @sql_sanitizer = McpToolkit::SqlSanitizer.new
+    @bare_filter_value_semantics = :tokenized
+    @non_numeric_pk_order = :created_at
+    @filter_operator_overrides = {}
+    @max_filter_values = 500
+    @max_batch_size = 50
+  end
+
+  # The default authority tool catalog when no explicit `tool_provider` is
+  # assigned: the generic Registry-backed tools first (so a generic name always
+  # resolves to them; included only when the host registered resources — a pure
+  # gateway keeps contributing nothing), then each extra provider — a bare tool
+  # CLASS is wrapped in a SingleToolProvider. Built per read (cheap, stateless
+  # providers), so a reload that re-assigns `extra_tool_providers` or registers
+  # resources takes effect immediately.
+  def composed_tool_provider
+    providers = []
+    providers << McpToolkit::Authority::RegistryToolProvider.new(config: self) if registry.resources.any?
+    Array(extra_tool_providers).each do |provider|
+      providers << (provider.respond_to?(:tool_definitions) ? provider : McpToolkit::Authority::SingleToolProvider.new(provider))
+    end
+    return nil if providers.empty?
+    return providers.first if providers.one?
+
+    McpToolkit::Authority::CompositeToolProvider.new(*providers)
+  end
+  private :composed_tool_provider
+
   # The authority transport's injection points all default to nil (a no-op): a
   # pure satellite/gateway never touches them. `rate_limit_window` is the sole
   # non-nil default (the window size only matters once a cap opts in).
@@ -357,6 +497,7 @@ class McpToolkit::Configuration
     @usage_flusher = nil
     @session_data_builder = nil
     @tool_provider = nil
+    @extra_tool_providers = []
     @rate_limit_max_requests = nil # nil = rate limiting disabled
     @rate_limit_window = 3600 # 1 hour
     @superuser_resolver = nil # nil = duck-type principal.superuser?
@@ -370,6 +511,19 @@ class McpToolkit::Configuration
   #   c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
   def register_upstream(key:, url:, public_tool_list: true)
     upstreams.register(key:, url:, public_tool_list:)
+  end
+
+  # Declares the gateway's upstreams from an ENV-var map — `{ key => env var
+  # name }` — the shape every authority host repeats: resets the registry first
+  # (idempotent across code reloads, where the registration typically re-runs in
+  # a `to_prepare`), and an upstream whose ENV url is blank is never registered,
+  # so an unconfigured environment behaves like no-upstreams. `env` is
+  # injectable for tests.
+  #
+  #   config.register_upstreams_from_env("billing" => "BILLING_MCP_URL")
+  def register_upstreams_from_env(mapping, env: ENV)
+    upstreams.reset!
+    mapping.each { |key, env_var| register_upstream(key:, url: env[env_var.to_s]) }
   end
 
   # The gateway handshake client name, defaulting to the server identity when the

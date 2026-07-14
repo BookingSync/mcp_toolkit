@@ -1,3 +1,234 @@
+## [0.5.0] - 2026-07-14
+
+Authority-path discoverability + backward-compatibility work (driven by an
+adopting host's parity review against the API contract the gem replaced), plus a
+role-aware mountable engine so an authority mounts its transport in one line, and
+filter-path hardening from a security review.
+
+### Security
+
+- `config.filter_operator_overrides` now rejects, at assignment time, any
+  operator outside `Filtering::AREL_PREDICATIONS`. Those are the only operators
+  the gem maps onto an Arel predication that binds/quotes its value; a host that
+  configured anything else (e.g. `"extract"`) would have it `public_send` to an
+  Arel attribute with the request value passed through verbatim — an
+  SQL-injection surface. A defense-in-depth guard in `Filtering.predicate_for`
+  also refuses to dispatch any non-predication operator, so the metaprogramming
+  call can never be reached with an unvetted method name. The default and
+  intended (`{ text: %w[eq in] }`-style) configurations were never vulnerable.
+- New `config.max_filter_values` (default `500`, `nil` disables) caps how many
+  values an IN-set filter may resolve to and how many operator conditions may be
+  ANDed on one attribute, so a valid token can't emit an unbounded IN clause /
+  AND-chain (oversized SQL + Arel AST + expensive planning). Rate limiting
+  remains opt-in via `config.rate_limit_max_requests`.
+- Added an injection-safety regression spec that renders real Arel SQL through a
+  correctly-escaping connection and asserts hostile payloads stay inside escaped
+  string literals (the prior fake connection did not escape quotes, so it could
+  not have caught an escaping regression).
+- New `config.max_batch_size` (default `50`, `nil` disables) caps the number of
+  JSON-RPC calls a single authority POST batch may carry. Rate limiting is a
+  per-HTTP-request `before_action`, so an uncapped batch let one request fan out
+  unbounded work (N tool executions / N blocking upstream calls) under a single
+  rate-limit tick; an over-size batch is now rejected as a JSON-RPC error before
+  any element runs.
+- The top-level `list` `ids` filter now honors `config.max_filter_values` — it
+  built `WHERE id IN (...)` on its own path, bypassing the cap that already
+  bounds the per-attribute filters.
+- The authority dispatcher no longer relays an unexpected exception's message to
+  the caller: an unhandled `StandardError` returns a generic "Internal error"
+  (full detail still logged), so `ActiveRecord::StatementInvalid` SQL, internal
+  class names, or an internal hostname can't leak in the JSON-RPC error.
+- The gateway `tools/list` aggregator now degrades a single malformed upstream
+  tool entry (a non-Hash / name-less definition) by skipping it, and wraps each
+  upstream's processing so any unexpected error omits only that upstream instead
+  of 500-ing the whole aggregated list for every upstream.
+- Usage metering flush falls back to per-event writes when the batch write
+  fails, so one un-persistable ("poison") event can no longer drop metering for
+  a whole request's batch (a billing-evasion vector).
+- The satellite tool path (`get` / `list` / `resource_schema` / `resources`) now
+  enforces `Resource#superusers_only!` — previously only the authority path did,
+  so a superuser-only resource served via a satellite was readable/discoverable
+  by any valid token (still account-scoped, so not cross-tenant). `get`/`list`/
+  `resource_schema` refuse it for a non-superuser; `resources` hides it.
+- The authority dispatcher now strips a caller-supplied `context` from a tool's
+  arguments before the keyword splat. `tool.call(context:, **arguments)` let a
+  splatted `context` argument OVERRIDE the gem-resolved `Authority::Context`
+  (auth-context injection) — harmless for the gem's own tools (a JSON context
+  fails closed with a NoMethodError) but the gem handed attacker-controlled data
+  as `context` to arbitrary host tools.
+- The gateway's transport-failure relay no longer leaks the internal upstream
+  host:port. `translate_upstream_call_error` returned `InternalError.new(error.message)`
+  for a transport failure, whose message is `"Failed to open TCP connection to
+  <host>:<port>"`; it now returns a generic error (the proxy already logs the
+  detail). A first-party upstream JSON-RPC error is still relayed verbatim.
+- `Tools::AuthorityBase#execute` no longer relays an unexpected exception's
+  message to the caller — it returns a generic "Internal error" (detail logged),
+  matching the dispatcher's own catch-all.
+- Usage metering's per-event flush fallback now cannot escape into the response:
+  a misbehaving `logger`/`error_reporter` in `flush_individually` is swallowed as
+  a last resort, preserving the "metering never affects the MCP response"
+  invariant.
+
+### Added
+
+- The mountable `McpToolkit::Engine` is now ROLE-AWARE: the
+  `McpToolkit::ServerController` it mounts at POST/GET/DELETE /mcp is built from
+  `config.auth_role` — an authority host gets the hand-rolled dispatcher path
+  (local token auth, gateway proxying, usage metering, rate limiting), a
+  satellite gets the SDK-backed path. So an authority now mounts its whole
+  transport with `mount McpToolkit::Engine => "/mcp"` (identical to a satellite)
+  instead of hand-drawing the four routes against a subclass of
+  `McpToolkit::Authority::ServerController` — which is still supported for a host
+  that prefers to draw its own routes.
+- `resource_schema` surfaces a resource's custom filters (`Resource#filter`)
+  under `resource_filters` — name, type and description — so a client can
+  discover them. The `Resource#filter` docs always promised this; nothing
+  delivered it, leaving custom filters functional but unadvertised.
+- The `resources` tool returns `filterable` (whether the resource accepts any
+  filter — allowlist or custom) and the resource's usage `note` alongside
+  name/description, so caveats surface at browse time, before a client picks a
+  resource.
+- The `list` tool description documents the full filter grammar — bare
+  equality, comma/array IN sets, the `"null"` token, `{ op:, value: }`
+  conditions and AND-ed condition arrays — plus resource-specific top-level
+  filters. Previously the operator payload shape was not documented anywhere a
+  client could see at runtime.
+- Bare equality filters accept an Array of scalars as an IN set
+  (`filter: { status: ["a", "b"] }`). Previously the array was stringified and
+  comma-split into fragments that silently matched nothing.
+- A JSON null filter value filters for `IS NULL` (like the `"null"` string
+  token). Previously it was silently ignored.
+
+All of the above applies to the SATELLITE generic tools too: they share the
+executors and schema builder, so their `resources` output gains
+`filterable`/`note`, their `resource_schema` output gains `resource_filters`,
+and their descriptions document the same filter grammar.
+
+### Host-compatibility seams (full parity with a pre-gem API contract)
+
+For a host migrating an EXISTING MCP endpoint onto the gem, whose clients hold
+the pre-gem contract:
+
+- `config.bare_filter_value_semantics = :literal` — bare filter values reach
+  the WHERE clause verbatim (`"a,b"` is one literal string, `"null"` is the
+  literal string, `""` matches empty-string rows, an Array — including nil
+  elements — gets the adapter's native IN / OR-IS-NULL handling). The default
+  `:tokenized` keeps the gem's comma/IN/`"null"`-token grammar. Operator
+  conditions are identical in both modes.
+- `config.non_numeric_pk_order = :primary_key` — lists of non-numeric-PK
+  resources order by the primary key alone, preserving a pre-gem
+  ORDER BY id contract. The default `:created_at` keeps chronological pages
+  with the PK tiebreaker.
+- `Resource#filter_requirements` — declares companion-key requirements (e.g. a
+  polymorphic foreign key that is type-ambiguous without its `*_type`): the
+  list executor rejects the key without its companion ("filter attribute X
+  requires Y to also be provided") and `resource_schema` advertises the
+  requirement, restoring safe polymorphic-FK filtering instead of dropping the
+  key from the allowlist. Accepts a Hash or a lazily-resolved callable, like
+  `filterable`.
+- `resource_schema` output restores the remaining pre-gem keys: top-level
+  `sparse_fieldsets: true` and `filter_examples` (ready-to-use payloads built
+  from the resource's own attributes/relationships), `relationships[].resource`
+  (nullable; `target_resource` remains as the resolved alias) and
+  `relationships[].filter` (`keys` / `type` / `operators` / `requires`).
+  Top-level nil keys are compacted (a nil `note` is omitted again).
+- Operator conditions work on ANY column type: types outside the operator
+  table (uuid, enum, jsonb, ...) accept `eq` / `in` instead of failing with
+  "cannot be filtered with operators", and `date` columns accept `in` again.
+- The `list` tools' input schemas declare `additionalProperties: true`
+  explicitly (resource-specific filters arrive as top-level arguments).
+- `config.register_upstreams_from_env(mapping, env: ENV)` — declares gateway
+  upstreams from a `{ key => env var }` map: resets the registry first
+  (idempotent across code reloads) and skips blank urls, the two gotchas every
+  authority host re-discovers.
+- `config.tool_provider` composes a sensible default when unset: the generic
+  Registry-backed provider (only when resources are registered — a pure
+  gateway still contributes nothing) plus `config.extra_tool_providers`
+  (providers, or bare tool classes auto-wrapped in the new
+  `Authority::SingleToolProvider`). Hosts with one bespoke tool no longer
+  hand-roll provider plumbing; assigning `tool_provider` explicitly still
+  takes full control.
+- `McpToolkit::Serializer::AssociationDescriptor` + `TargetRef` — the exported
+  structs for the association duck-type the schema builder and field selection
+  probe, so a host adapting its own serializer framework doesn't re-derive the
+  field names by hand.
+- The authority `list` tool's served description states the bare-value grammar
+  the host ACTUALLY configured: under `:literal` semantics the comma/`"null"`
+  tokenization bullet is replaced by the literal-matching one, so served docs
+  never advertise filters that would silently match nothing.
+- The authority tools are advertised in alphabetical base-name order
+  (`get`, `list`, `resource_schema`, `resources`) and string/text operator
+  lists keep the pre-gem order (`eq, in, not_eq, matches, does_not_match`) —
+  JSON arrays are ordered, so byte-diffing clients see no reorder.
+- `get` / `resource_schema` reject arguments outside their input schema with
+  InvalidParams instead of silently ignoring them (pre-gem parity — they were
+  strict Ruby kwargs; `account_id` is always tolerated, the transport consumes
+  it). `resources` and `list` stay tolerant of extra arguments, also matching
+  the pre-gem contract (`list`'s extras are the resource-specific filters).
+- `config.filter_operator_overrides` — per-column-type overrides for the
+  operator sets advertised by `resource_schema` AND enforced by the executor
+  (single source, they cannot disagree), so a host can preserve a pre-gem
+  operator contract exactly (e.g. `{ text: %w[eq in], date: %w[eq in] }`).
+  Empty by default: the gem's own sets apply.
+- A companion key whose value the executor would SKIP (an empty string under
+  `:tokenized` semantics) no longer satisfies a `filter_requirements` pairing —
+  the foreign key is rejected rather than applied alone (type-ambiguous).
+- `resource_filters` entries keep nil `type`/`description` keys (pre-gem
+  shape) instead of compacting them; the relationship `filter_examples`
+  companion sample value is `"User"` (pre-gem sample) rather than `"..."`.
+
+### Known operator-path delta (documented, not reverted)
+
+- `{ op: "in", value: "a,b" }` now splits the comma-separated string into an
+  IN set (previously `in` matched the literal string `'a,b'` as a single
+  element; only `eq` split). Comma-separated STRING ELEMENTS inside an Array
+  value are split the same way — under the tokenized operator grammar there is
+  no way to express a literal comma inside an IN element; a literal
+  comma-containing match is expressed as a bare equality value (which hosts on
+  `:literal` semantics match verbatim).
+
+### Fixed
+
+- Generic tool descriptions and input schemas rewrite sibling-tool references
+  (e.g. "use the `resources` tool") to carry `config.generic_tool_name_prefix`,
+  so a host that namespaces its generic tools no longer serves prose pointing
+  at unprefixed tool names that do not exist on its server. The gateway
+  aggregator applies the same rewrite with the upstream namespace, so a proxied
+  `<app>__list` no longer points a client at the upstream's bare tool names
+  (`McpToolkit::ToolReferenceRewriter`).
+- `eq` / `in` operator conditions against `"null"` / null render `IS NULL`
+  instead of `IN (NULL)`, which matches no rows in SQL.
+- `eq` / `in` operator conditions accept an Array `value` (previously
+  stringified and comma-split into fragments).
+- Non-numeric-PK resources order by `created_at` WITH the primary key as a
+  tiebreaker, restoring a total order so offset pagination cannot duplicate or
+  skip rows that share a timestamp (e.g. bulk inserts).
+- An Array mixing `{ op:, value: }` conditions with bare values is rejected
+  with InvalidParams instead of being misread as bare equality values.
+- One resource's failing lazy `filterable` resolution (e.g. a transient DB
+  error inside a host-supplied callable) no longer fails the whole `resources`
+  discovery index: the `filterable` key is omitted for that resource and the
+  unresolved source is retried on the next read instead of permanently and
+  silently resolving the allowlist to `{}`.
+
+### Changed (explicit over silent — each previously returned a wrong or empty result)
+
+- IN-set elements must be non-null scalars: a nil, Hash or nested-Array element
+  inside an Array filter value raises InvalidParams (previously a Hash element
+  raised a TypeError at query time and a nil element rendered the
+  never-matching `IN (..., NULL)`). The `"null"` token is NOT resolved inside a
+  set — SQL `IN` cannot match NULL — so a null-or-nothing condition is
+  expressed as the filter's single scalar value.
+- A null value with an operator other than `eq` / `in` / `not_eq` (comparisons,
+  `matches` / `does_not_match`) raises InvalidParams; a comparison or LIKE
+  against NULL can never match a row (previously `matches` with a JSON null
+  matched every row via `LIKE '%%'`, and comparisons silently matched nothing).
+- An op-less Hash as a bare filter value raises InvalidParams (previously it
+  reached the database as a malformed condition).
+- `{ op: "eq", value: "" }` matches rows whose value IS the empty string
+  (previously it matched nothing via an empty IN set). A bare `""` filter value
+  still means "no filter".
+
 ## [0.4.0] - 2026-07-06
 
 ### Added

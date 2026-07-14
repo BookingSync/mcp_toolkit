@@ -2,7 +2,7 @@
 
 # Engine routes, drawn through Rails' routes_reloader so they survive route
 # reloads (a class-body `routes.draw` is wiped when the app re-draws the engine's
-# route set on boot/reload). Mounted by a satellite via:
+# route set on boot/reload). Mounted by a satellite or an authority via:
 #
 #   mount McpToolkit::Engine => "/mcp"
 #

@@ -43,9 +43,26 @@ class McpToolkit::Authority::Tools::Base
     end
 
     # The static tool definition returned by the provider's `tool_definitions`
-    # (part of `tools/list`). Generic and context-independent.
-    def definition
-      { name: tool_name, description: _description, inputSchema: input_schema }
+    # (part of `tools/list`). Generic and context-independent. `name_prefix` is
+    # the host's `config.generic_tool_name_prefix`: it prefixes the advertised
+    # name AND is threaded through every sibling-tool reference in the
+    # description / input schema (see McpToolkit::ToolReferenceRewriter).
+    # `config` lets a tool adapt its prose to host configuration (see
+    # .description_text) — served docs must describe the behavior the host
+    # actually configured.
+    def definition(name_prefix: "", config: nil)
+      {
+        name: "#{name_prefix}#{tool_name}",
+        description: McpToolkit::ToolReferenceRewriter.rewrite(description_text(config), name_prefix),
+        inputSchema: McpToolkit::ToolReferenceRewriter.rewrite(input_schema, name_prefix)
+      }
+    end
+
+    # Hook for a tool whose description depends on host configuration
+    # (Tools::List swaps its bare-value grammar per
+    # config.bare_filter_value_semantics). Default: the static description.
+    def description_text(_config)
+      _description
     end
   end
 
@@ -118,5 +135,16 @@ class McpToolkit::Authority::Tools::Base
     yield
   rescue McpToolkit::Errors::InvalidParams => e
     raise McpToolkit::Protocol::InvalidParams, e.message
+  end
+
+  # Rejects tool arguments outside the declared input schema (-32602) instead of
+  # silently ignoring them — a typo'd argument name should surface, not no-op.
+  # `list` deliberately does NOT use this: its extra top-level arguments are the
+  # resource-specific custom filters. (`account_id` is consumed by the
+  # transport's account resolution, so every tool tolerates it explicitly.)
+  def reject_unknown_arguments!(extra)
+    return if extra.empty?
+
+    raise McpToolkit::Protocol::InvalidParams, "unknown argument(s): #{extra.keys.join(", ")}"
   end
 end

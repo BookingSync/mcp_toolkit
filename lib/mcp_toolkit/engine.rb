@@ -3,12 +3,15 @@
 # Mountable Rails engine that draws the MCP transport routes plus the authority
 # introspection route (defined in the engine's config/routes.rb so they survive
 # Rails' route reloads) against the gem-provided McpToolkit::ServerController /
-# McpToolkit::TokensController. A satellite mounts it in one line:
+# McpToolkit::TokensController. A satellite OR an authority mounts it in one line:
 #
 #   # config/routes.rb
 #   mount McpToolkit::Engine => "/mcp"
 #
-# yielding exactly the endpoints a hand-rolled satellite declared:
+# The mounted McpToolkit::ServerController is role-aware (built lazily from
+# config.auth_role): an authority host gets the hand-rolled dispatcher path, a
+# satellite gets the SDK-backed one — see engine_controllers.rb. This yields
+# exactly the endpoints a hand-rolled host declared:
 #
 #   POST   /mcp                     -> create     (JSON-RPC requests/responses)
 #   GET    /mcp                     -> stream     (405; no server-initiated SSE)

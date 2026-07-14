@@ -92,10 +92,383 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       expect(result[:widgets].map { |w| w[:id] }).to eq([1, 3])
     end
 
+    it "caps the top-level `ids` filter at config.max_filter_values" do
+      McpToolkit.config.max_filter_values = 3
+
+      expect { described_class.call(resource:, scope_root: account, params: { ids: "1,2,3,4" }) }
+        .to raise_error(McpToolkit::Errors::InvalidParams, /at most 3 values/)
+    end
+
+    it "allows an `ids` list within config.max_filter_values" do
+      McpToolkit.config.max_filter_values = 3
+
+      expect { described_class.call(resource:, scope_root: account, params: { ids: "1,2,3" }) }
+        .not_to raise_error
+    end
+
     it "treats a comma-separated equality value as an IN set (API v3 parity)" do
       result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: "10,20" } })
 
       expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
+    end
+
+    it "treats an Array of scalars as an IN set (API v3 parity)" do
+      result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: [10, 20] } })
+
+      expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
+    end
+
+    it "flattens comma-separated strings inside an Array into the IN set" do
+      result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: ["10,20"] } })
+
+      expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2, 3])
+    end
+
+    it "rejects an Array mixing operator conditions and bare values" do
+      expect do
+        described_class.call(
+          resource:, scope_root: account,
+          params: { filter: { price: [{ op: "gteq", value: 100 }, 200] } }
+        )
+      end.to raise_error(McpToolkit::Errors::InvalidParams, /only \{ op:, value: \} conditions or only bare values/)
+    end
+
+    it "rejects a mixed Array regardless of element order (bare value first)" do
+      expect do
+        described_class.call(
+          resource:, scope_root: account,
+          params: { filter: { price: [200, { op: "gteq", value: 100 }] } }
+        )
+      end.to raise_error(McpToolkit::Errors::InvalidParams, /only \{ op:, value: \} conditions or only bare values/)
+    end
+
+    describe "NULL filtering (API v3 parity)" do
+      let(:rows) do
+        [
+          FakeRecord.new(id: 1, name: "alpha", booking_id: 10, price: 100),
+          FakeRecord.new(id: 2, name: nil, booking_id: nil, price: 200)
+        ]
+      end
+
+      it "treats the \"null\" token as IS NULL" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: "null" } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "treats a JSON null as IS NULL (not a silently-dropped filter)" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: nil } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "still treats an empty string as no filter" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: "" } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2])
+      end
+
+      it "resolves { op: \"eq\", value: \"null\" } to IS NULL (not IN (NULL))" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: { op: "eq", value: "null" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "resolves { op: \"not_eq\", value: \"null\" } to IS NOT NULL" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: { op: "not_eq", value: "null" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "accepts an Array value for an { op: \"in\" } condition" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "in", value: ["alpha"] } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "resolves { op: \"in\", value: \"null\" } to IS NULL (not IN (NULL))" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "in", value: "null" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "resolves an { op: \"eq\" } condition with a JSON null value to IS NULL" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: { op: "eq", value: nil } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "keeps the \"null\" token LITERAL inside an IN set (SQL IN cannot match NULL)" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: %w[alpha null] } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "rejects a nil element inside an IN set with InvalidParams" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { filter: { name: ["alpha", nil] } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /non-null scalar/)
+      end
+
+      it "rejects a null value for `matches` with InvalidParams (LIKE NULL can never match)" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { name: { op: "matches", value: "null" } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /does not accept a null value/)
+      end
+
+      it "rejects a null value for a comparison operator with InvalidParams" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { price: { op: "gt", value: "null" } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /does not accept a null value/)
+      end
+    end
+
+    describe ":literal bare-value semantics (config.bare_filter_value_semantics — pre-gem API parity)" do
+      let(:rows) do
+        [
+          FakeRecord.new(id: 1, name: "a,b", booking_id: 10, price: 100),
+          FakeRecord.new(id: 2, name: "null", booking_id: nil, price: 200),
+          FakeRecord.new(id: 3, name: "", booking_id: 30, price: 300)
+        ]
+      end
+
+      before { McpToolkit.config.bare_filter_value_semantics = :literal }
+
+      it "matches a comma-containing value literally (no IN split)" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { name: "a,b" } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "matches the string \"null\" literally (no NULL token)" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { name: "null" } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "matches empty-string rows for a bare \"\" (no skip)" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { name: "" } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([3])
+      end
+
+      it "hands an Array (including a nil element) to the adapter verbatim (IN + OR IS NULL)" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { booking_id: [10, nil] } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2])
+      end
+
+      it "still filters IS NULL for a bare JSON null (verbatim nil)" do
+        result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: nil } })
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "still rejects an op-less Hash" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { filter: { name: { foo: 1 } } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /unsupported filter value/)
+      end
+
+      it "leaves operator conditions untouched (same in both modes)" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { price: { op: "gteq", value: 200 } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2, 3])
+      end
+    end
+
+    describe "companion-key filter requirements (Resource#filter_requirements)" do
+      before do
+        serializer = widget_serializer
+        model = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:poly_widgets) do
+            model model
+            serializer serializer
+            description "Widgets with a polymorphic-style companion requirement."
+            filterable booking_id: :booking_id, name: :name
+            filter_requirements booking_id: :name
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      subject(:poly_resource) { McpToolkit.registry.fetch("poly_widgets") }
+
+      it "rejects the key without its companion, naming both (pre-gem API parity message)" do
+        expect do
+          described_class.call(resource: poly_resource, scope_root: account, params: { filter: { booking_id: 10 } })
+        end.to raise_error(
+          McpToolkit::Errors::InvalidParams,
+          "filter attribute booking_id requires name to also be provided"
+        )
+      end
+
+      it "accepts the key together with its companion" do
+        result = described_class.call(
+          resource: poly_resource, scope_root: account, params: { filter: { booking_id: 10, name: "alpha" } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "leaves the companion key usable on its own" do
+        result = described_class.call(
+          resource: poly_resource, scope_root: account, params: { filter: { name: "alpha" } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "rejects a companion whose value would be SKIPPED (\"\" under :tokenized) — no bypass" do
+        expect do
+          described_class.call(
+            resource: poly_resource, scope_root: account, params: { filter: { booking_id: 10, name: "" } }
+          )
+        end.to raise_error(
+          McpToolkit::Errors::InvalidParams,
+          "filter attribute booking_id requires name to also be provided"
+        )
+      end
+    end
+
+    describe "config.filter_operator_overrides (pre-gem operator contract)" do
+      before { McpToolkit.config.filter_operator_overrides = { string: %w[eq in] } }
+
+      it "narrows the ENFORCED operator set for the overridden type" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { name: { op: "matches", value: "al" } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /not supported/)
+      end
+
+      it "keeps operators inside the overridden set working" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "in", value: "alpha" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1])
+      end
+
+      it "narrows the ADVERTISED operator set identically (schema and executor cannot disagree)" do
+        schema = McpToolkit::ResourceSchema.call(resource)
+        name_attribute = schema[:attributes].find { |a| a[:name] == :name }
+
+        expect(name_attribute[:operators]).to eq(%w[eq in])
+      end
+
+      it "leaves non-overridden types on the gem's own sets" do
+        expect(McpToolkit::Filtering.operators_for(:integer)).to eq(%w[eq not_eq gt gteq lt lteq])
+      end
+    end
+
+    describe "operator support for column types outside the operator table" do
+      let(:uuid_widget_model) do
+        Class.new do
+          def self.columns_hash
+            {
+              "id" => FakeRelation::Column.new(:uuid),
+              "name" => FakeRelation::Column.new(:string),
+              "booking_id" => FakeRelation::Column.new(:integer),
+              "price" => FakeRelation::Column.new(:integer)
+            }
+          end
+          def self.primary_key = "id"
+          def self.model_name = FakeModelName.new("widgets")
+        end
+      end
+
+      before do
+        serializer = widget_serializer
+        model = uuid_widget_model
+        rel = FakeRelation.new(rows, table_name: "widgets", model: uuid_widget_model)
+        McpToolkit.configure do |c|
+          c.registry.register(:uuid_widgets) do
+            model model
+            serializer serializer
+            description "Widgets with a uuid id."
+            filterable id: :id
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "accepts eq / in on a uuid column instead of 'cannot be filtered with operators'" do
+        result = described_class.call(
+          resource: McpToolkit.registry.fetch("uuid_widgets"), scope_root: account,
+          params: { filter: { id: { op: "in", value: "1,2" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([1, 2])
+      end
+
+      it "still rejects operators outside the eq/in fallback for such columns" do
+        expect do
+          described_class.call(
+            resource: McpToolkit.registry.fetch("uuid_widgets"), scope_root: account,
+            params: { filter: { id: { op: "gt", value: 1 } } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /not supported/)
+      end
+    end
+
+    describe "empty-string and malformed filter values" do
+      let(:rows) do
+        [
+          FakeRecord.new(id: 1, name: "alpha", booking_id: 10, price: 100),
+          FakeRecord.new(id: 2, name: "", booking_id: 20, price: 200)
+        ]
+      end
+
+      it "matches rows whose value IS the empty string for { op: \"eq\", value: \"\" }" do
+        result = described_class.call(
+          resource:, scope_root: account, params: { filter: { name: { op: "eq", value: "" } } }
+        )
+
+        expect(result[:widgets].map { |w| w[:id] }).to eq([2])
+      end
+
+      it "rejects a Hash element inside an IN set with InvalidParams (was a query-time TypeError)" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { filter: { name: [{ foo: 1 }] } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /non-null scalar/)
+      end
+
+      it "rejects a nested Array element inside an IN set with InvalidParams" do
+        expect do
+          described_class.call(
+            resource:, scope_root: account, params: { filter: { price: [[{ op: "eq", value: 100 }]] } }
+          )
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /non-null scalar/)
+      end
+
+      it "rejects an op-less Hash as a bare filter value with InvalidParams" do
+        expect do
+          described_class.call(resource:, scope_root: account, params: { filter: { name: { foo: 1 } } })
+        end.to raise_error(McpToolkit::Errors::InvalidParams, /unsupported filter value/)
+      end
     end
 
     it "rejects unknown filter keys with InvalidParams" do
@@ -183,24 +556,24 @@ RSpec.describe "Registry + executors + serializer (data path)" do
     end
 
     describe "ordering by numeric vs non-numeric primary key (API v3 parity)" do
-      # A relation that records which column it was last ordered by.
+      # A relation that records which column(s) it was last ordered by.
       let(:ordering_relation_class) do
         Class.new(FakeRelation) do
           attr_reader :ordered_by
 
-          def order(column)
-            @ordered_by = column
+          def order(*columns)
+            @ordered_by = columns.length == 1 ? columns.first : columns
             super
           end
         end
       end
 
-      def register_resource_with_pk_type(pk_type)
+      def register_resource_with_pk_type(pk_type, pk_name: "id")
         model = Class.new do
           define_singleton_method(:columns_hash) do
-            { "id" => FakeRelation::Column.new(pk_type), "created_at" => FakeRelation::Column.new(:datetime) }
+            { pk_name => FakeRelation::Column.new(pk_type), "created_at" => FakeRelation::Column.new(:datetime) }
           end
-          def self.primary_key = "id"
+          define_singleton_method(:primary_key) { pk_name }
           def self.model_name = FakeModelName.new("things")
         end
         serializer = Class.new(McpToolkit::Serializer::Base) do
@@ -227,12 +600,32 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         expect(rel.ordered_by).to eq(:id)
       end
 
-      it "orders by :created_at when the primary key is non-numeric" do
+      it "orders by :created_at with the PK as tiebreaker when the primary key is non-numeric" do
         rel = register_resource_with_pk_type(:uuid)
 
         described_class.call(resource: McpToolkit.registry.fetch("things"), scope_root: account, params: {})
 
-        expect(rel.ordered_by).to eq(:created_at)
+        # The PK tiebreaker restores a total order: rows bulk-inserted in one
+        # transaction share a created_at, and offset pagination over a partial
+        # order can duplicate or skip rows across pages.
+        expect(rel.ordered_by).to eq(%i[created_at id])
+      end
+
+      it "reads the tiebreaker column off the model's primary key, not a hardcoded :id" do
+        rel = register_resource_with_pk_type(:uuid, pk_name: "uuid")
+
+        described_class.call(resource: McpToolkit.registry.fetch("things"), scope_root: account, params: {})
+
+        expect(rel.ordered_by).to eq(%i[created_at uuid])
+      end
+
+      it "orders by the primary key alone under config.non_numeric_pk_order = :primary_key (pre-gem parity)" do
+        rel = register_resource_with_pk_type(:uuid)
+        McpToolkit.config.non_numeric_pk_order = :primary_key
+
+        described_class.call(resource: McpToolkit.registry.fetch("things"), scope_root: account, params: {})
+
+        expect(rel.ordered_by).to eq(:id)
       end
     end
 
@@ -391,13 +784,108 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       id = schema[:attributes].find { |a| a[:name] == :id }
 
       expect(booking[:operators]).to eq(%w[eq not_eq gt gteq lt lteq])
-      expect(name[:operators]).to eq(%w[eq not_eq in matches does_not_match])
+      # Pre-gem contract order (JSON arrays are ordered; byte-diffing clients see reorders).
+      expect(name[:operators]).to eq(%w[eq in not_eq matches does_not_match])
       # A non-filterable attribute advertises an empty operator set.
       expect(id[:operators]).to eq([])
     end
 
-    it "passes through a nil note for a resource without one" do
-      expect(described_class.call(resource)).to include(note: nil)
+    it "omits the note key for a resource without one (compacted, API parity)" do
+      expect(described_class.call(resource)).not_to have_key(:note)
+    end
+
+    it "advertises an empty resource_filters list for a resource without custom filters" do
+      expect(described_class.call(resource)).to include(resource_filters: [])
+    end
+
+    it "advertises sparse fieldset support (API parity key)" do
+      expect(described_class.call(resource)).to include(sparse_fieldsets: true)
+    end
+
+    it "builds ready-to-use filter_examples from the resource's own attributes" do
+      examples = described_class.call(resource)[:filter_examples]
+
+      # widgets: name (string) => equality example; price/booking_id (integer,
+      # gt-capable) => comparison + range examples; no relationship filter here.
+      expect(examples).to include(name: "...")
+      expect(examples).to include(booking_id: { op: "gt", value: 1 })
+      expect(examples).to include(booking_id: [{ op: "gteq", value: 1 }, { op: "lt", value: 1 }])
+    end
+
+    context "with a filterable relationship foreign key and a companion requirement" do
+      let(:noted_widget_serializer) do
+        model = widget_model
+        Class.new(McpToolkit::Serializer::Base) do
+          attributes :id, :booking_id
+          has_one :booking
+          self.model_class = model
+          def self.name = "RelWidgetSerializer"
+        end
+      end
+
+      before do
+        serializer = noted_widget_serializer
+        model = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:rel_widgets) do
+            model model
+            serializer serializer
+            description "Widgets with a filterable relationship."
+            # The requirement's companion must itself be filterable (see
+            # Resource#filter_requirements) — here booking_type is aliased to a
+            # backing column so the advertised pair is actually acceptable.
+            filterable booking_id: :booking_id, booking: :booking_id, booking_type: :name
+            filter_requirements booking_id: :booking_type
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "describes HOW to filter by the relationship: keys, type, operators and requires" do
+        schema = described_class.call(McpToolkit.registry.fetch("rel_widgets"))
+        relationship = schema[:relationships].find { |r| r[:name] == "booking" }
+
+        expect(relationship[:filter]).to eq(
+          keys: %i[booking_id booking],
+          type: "integer",
+          operators: %w[eq not_eq gt gteq lt lteq],
+          requires: :booking_type
+        )
+      end
+
+      it "includes a relationship example carrying the required companion key (pre-gem sample value)" do
+        examples = described_class.call(McpToolkit.registry.fetch("rel_widgets"))[:filter_examples]
+
+        expect(examples).to include(booking_id: 1, booking_type: "User")
+      end
+    end
+
+    context "with custom filters (the Resource#filter seam)" do
+      before do
+        serializer = widget_serializer
+        model = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:filtered_widgets) do
+            model model
+            serializer serializer
+            description "Widgets with a relational custom filter."
+            filter :for_booking, type: :integer, description: "Only widgets for this booking" do |relation, value|
+              relation.where(booking_id: value)
+            end
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "surfaces each custom filter's name, type and description under resource_filters" do
+        schema = described_class.call(McpToolkit.registry.fetch("filtered_widgets"))
+
+        expect(schema[:resource_filters]).to eq(
+          [{ name: "for_booking", type: "integer", description: "Only widgets for this booking" }]
+        )
+      end
     end
 
     context "with a resource note" do
@@ -481,21 +969,25 @@ RSpec.describe "Registry + executors + serializer (data path)" do
         described_class.call(McpToolkit.registry.fetch("scheduled_notifications"), registry: McpToolkit.registry)
       end
 
-      it "names the target resource a singular link resolves to" do
+      it "names the target resource a singular link resolves to (both the legacy and additive keys)" do
         relationship = schema[:relationships].find { |r| r[:name] == "notification" }
 
         expect(relationship).to include(
           name: "notification",
           kind: "has_one",
           polymorphic: false,
+          resource: "notifications",
           target_resource: "notifications"
         )
       end
 
-      it "omits target fields (additive/backward-compatible) when no resource matches" do
+      it "emits a null legacy `resource` and omits `target_resource` when no resource matches" do
         relationship = schema[:relationships].find { |r| r[:name] == "orphans" }
 
-        expect(relationship.keys).to contain_exactly(:name, :kind, :polymorphic)
+        # `resource` / `filter` are always-present nullable keys (API parity);
+        # `target_resource` stays omit-when-unresolved (its 0.4.0 contract).
+        expect(relationship.keys).to contain_exactly(:name, :kind, :polymorphic, :resource, :filter)
+        expect(relationship).to include(resource: nil, filter: nil)
       end
 
       it "leaves a polymorphic link unresolved (no single target resource)" do

@@ -116,7 +116,7 @@ RSpec.describe McpToolkit::UsageMetering::Recorder do
       expect(called).to be(false)
     end
 
-    it "swallows + reports a sink error so the response is never affected" do
+    it "reports the dropped event and never affects the response when the sink keeps failing" do
       reported = []
       logger = instance_double(Logger, warn: nil)
       recorder = described_class.new(
@@ -126,7 +126,53 @@ RSpec.describe McpToolkit::UsageMetering::Recorder do
 
       expect { recorder.flush(controller:) }.not_to raise_error
       expect(reported.map(&:message)).to eq(["sink down"])
-      expect(logger).to have_received(:warn).with(/MCP usage tracking/)
+      expect(logger).to have_received(:warn).with(/MCP usage tracking/).at_least(:once)
+    end
+
+    it "falls back to per-event writes so a batch failure still persists the good events" do
+      persisted = []
+      sink = lambda do |events|
+        raise "batch too big" if events.size > 1
+
+        persisted.concat(events)
+      end
+      recorder = described_class.new(event_builder:, sink:)
+      recorder.record(request_data: tools_call(arguments: { "resource" => "bookings" }), account:, principal:, controller:)
+      recorder.record(request_data: tools_call(arguments: { "resource" => "rentals" }), account:, principal:, controller:)
+
+      recorder.flush(controller:)
+
+      expect(persisted.map { |e| e[:arguments] }).to eq([{ "resource" => "bookings" }, { "resource" => "rentals" }])
+    end
+
+    it "isolates a single poison event: siblings persist, only the poison one is dropped + reported" do
+      reported = []
+      persisted = []
+      sink = lambda do |events|
+        raise "constraint" if events.any? { |e| e[:tool] == "poison" }
+
+        persisted.concat(events)
+      end
+      recorder = described_class.new(event_builder:, sink:, error_reporter: ->(e) { reported << e })
+      recorder.record(request_data: tools_call(name: "good"), account:, principal:, controller:)
+      recorder.record(request_data: tools_call(name: "poison"), account:, principal:, controller:)
+
+      recorder.flush(controller:)
+
+      expect(persisted.map { |e| e[:tool] }).to eq(["good"])
+      expect(reported.map(&:message)).to eq(["constraint"])
+    end
+
+    it "never lets a misbehaving logger or error_reporter escape (metering can't break the response)" do
+      boom_logger = instance_double(Logger)
+      allow(boom_logger).to receive(:warn).and_raise("logger down")
+      recorder = described_class.new(
+        event_builder:, sink: ->(_) { raise "sink down" },
+        logger: boom_logger, error_reporter: ->(_) { raise "reporter down" }
+      )
+      recorder.record(request_data: tools_call, account:, principal:, controller:)
+
+      expect { recorder.flush(controller:) }.not_to raise_error
     end
   end
 end

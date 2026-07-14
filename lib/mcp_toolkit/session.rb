@@ -28,9 +28,9 @@ class McpToolkit::Session
     stored = config.cache_store.read(cache_key(id))
     return nil unless stored
 
-    # Sliding expiry: bump TTL on every successful lookup.
+    # Sliding expiry: bump TTL on every successful lookup, re-writing the row
+    # untouched.
     config.cache_store.write(cache_key(id), stored, expires_in: config.session_ttl)
-    # `data` defaults to {} for legacy rows written before the payload existed.
     new(id:, data: stored[:data] || {})
   end
 

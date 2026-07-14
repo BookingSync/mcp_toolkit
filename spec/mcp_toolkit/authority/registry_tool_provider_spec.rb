@@ -67,10 +67,10 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
   end
 
   describe "#tool_definitions" do
-    it "returns the four static generic tool definitions" do
+    it "returns the four generic tool definitions in the pre-gem (alphabetical) order" do
       names = provider.tool_definitions(context).map { |definition| definition[:name] }
 
-      expect(names).to contain_exactly("resources", "resource_schema", "get", "list")
+      expect(names).to eq(%w[get list resource_schema resources])
     end
 
     it "gives every definition a name, description and inputSchema (the tools/list shape)" do
@@ -132,6 +132,17 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
       expect { get.call(context:, resource: "", id: 1) }
         .to raise_error(McpToolkit::Protocol::InvalidParams, /resource is required/)
     end
+
+    it "rejects arguments outside the input schema instead of silently ignoring them (pre-gem parity)" do
+      expect { get.call(context:, resource: "widgets", id: 1, bogus: true) }
+        .to raise_error(McpToolkit::Protocol::InvalidParams, /unknown argument\(s\): bogus/)
+    end
+
+    it "tolerates the transport-level account_id selector" do
+      result = get.call(context:, resource: "widgets", id: 1, account_id: 99)
+
+      expect(result).to include(id: 1)
+    end
   end
 
   describe "the `list` tool" do
@@ -165,10 +176,139 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
   describe "the `resources` tool" do
     subject(:resources) { provider.find("resources") }
 
-    it "lists every registered resource's name and description" do
+    it "lists every registered resource's name, description and filterability" do
       result = resources.call(context:)
 
-      expect(result[:resources]).to contain_exactly({ name: "widgets", description: "Test widgets." })
+      expect(result[:resources]).to contain_exactly(
+        { name: "widgets", description: "Test widgets.", filterable: true }
+      )
+    end
+
+    it "tolerates ANY extra argument (unlike get/resource_schema — pre-gem parity)" do
+      result = resources.call(context:, bogus: 1, account_id: 99)
+
+      expect(result[:resources]).not_to be_empty
+    end
+
+    context "with an unfilterable resource carrying a usage note" do
+      before do
+        s = widget_serializer
+        m = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:raw_events) do
+            model m
+            serializer s
+            description "Raw events."
+            note "Internal debugging data; do not interpret without domain knowledge."
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "surfaces filterable: false and the note at browse time" do
+        result = resources.call(context:)
+
+        expect(result[:resources]).to include(
+          name: "raw_events",
+          description: "Raw events.",
+          filterable: false,
+          note: "Internal debugging data; do not interpret without domain knowledge."
+        )
+      end
+    end
+
+    context "with a resource whose lazy filterable source raises" do
+      before do
+        s = widget_serializer
+        m = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:flaky) do
+            model m
+            serializer s
+            description "Flaky."
+            filterable { raise "boom: db unavailable" }
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "keeps the whole discovery index available, omitting only that resource's filterable key" do
+        result = resources.call(context:)
+        flaky_entry = result[:resources].find { |resource| resource[:name] == "flaky" }
+        widgets_entry = result[:resources].find { |resource| resource[:name] == "widgets" }
+
+        expect(flaky_entry).to eq(name: "flaky", description: "Flaky.")
+        expect(widgets_entry).to include(filterable: true)
+      end
+    end
+
+    context "with a resource whose only filter is a custom filter" do
+      before do
+        s = widget_serializer
+        m = widget_model
+        rel = relation
+        McpToolkit.configure do |c|
+          c.registry.register(:custom_only) do
+            model m
+            serializer s
+            description "Custom-filter-only."
+            filter :for_booking, type: :integer, description: "Only rows for this booking" do |relation, value|
+              relation.where(booking_id: value)
+            end
+            scope { |_root| rel }
+          end
+        end
+      end
+
+      it "counts the custom filter as filterable" do
+        result = resources.call(context:)
+        entry = result[:resources].find { |resource| resource[:name] == "custom_only" }
+
+        expect(entry).to include(filterable: true)
+      end
+    end
+  end
+
+  describe "the advertised filter grammar (discoverability contract)" do
+    it "documents the operator payload shape, NULL token, IN sets and resource_filters in the `list` description" do
+      description = provider.tool_definitions(context).find { |d| d[:name] == "list" }[:description]
+
+      expect(description).to include('{ "op": <operator>, "value": <value> }')
+        .and include('"gteq"')
+        .and include('"null"')
+        .and include("array of scalars")
+        .and include("resource_filters")
+    end
+
+    it "embeds the exact tokenized grammar bullet (the substitution anchor for :literal hosts)" do
+      list_class = McpToolkit::Authority::Tools::List
+
+      expect(list_class.description).to include(list_class::BARE_VALUE_GRAMMAR[:tokenized])
+    end
+
+    context "when the host configures :literal bare-value semantics" do
+      before { McpToolkit.config.bare_filter_value_semantics = :literal }
+
+      # Served docs must describe the semantics the host actually configured —
+      # a client following tokenization advice on a :literal host would send
+      # comma/"null" filters that silently match nothing.
+      it "serves the literal bare-value grammar in the `list` description" do
+        description = provider.tool_definitions(context).find { |d| d[:name] == "list" }[:description]
+
+        expect(description).to include("LITERALLY")
+        expect(description).not_to include('"booked,canceled"')
+      end
+    end
+
+    it "documents resource_filters and the filterable/note keys in the discovery tools' descriptions" do
+      definitions = provider.tool_definitions(context)
+      schema_description = definitions.find { |d| d[:name] == "resource_schema" }[:description]
+      resources_description = definitions.find { |d| d[:name] == "resources" }[:description]
+
+      expect(schema_description).to include("resource_filters").and include("TOP-LEVEL")
+      expect(resources_description).to include("`filterable`").and include("`note`")
     end
   end
 
@@ -182,6 +322,11 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
 
       expect(schema[:name]).to eq("widgets")
       expect(schema[:attributes].map { |attribute| attribute[:name] }).to include(:booking_id)
+    end
+
+    it "rejects arguments outside the input schema (pre-gem parity)" do
+      expect { resource_schema.call(context:, resource: "widgets", bogus: 1) }
+        .to raise_error(McpToolkit::Protocol::InvalidParams, /unknown argument\(s\): bogus/)
     end
   end
 
@@ -284,6 +429,41 @@ RSpec.describe McpToolkit::Authority::RegistryToolProvider do
 
       it "no longer resolves the bare base name (only the prefixed name is a tool)" do
         expect(provider.find("list")).to be_nil
+      end
+
+      # Prose pointing at `resources` on a server that only advertises
+      # `foo_resources` would send a client to a tool that does not exist.
+      it "rewrites sibling-tool references in every description to the prefixed names" do
+        provider.tool_definitions(context).each do |definition|
+          expect(definition[:description]).not_to match(/`(resources|resource_schema|get|list)`/)
+        end
+      end
+
+      it "rewrites every tool's cross-references, not just one tool's" do
+        by_name = provider.tool_definitions(context).to_h { |d| [d[:name], d[:description]] }
+
+        expect(by_name["foo_list"]).to include("`foo_resources`").and include("`foo_resource_schema`")
+        expect(by_name["foo_get"]).to include("`foo_resources`")
+        expect(by_name["foo_resources"]).to include("`foo_resource_schema`")
+        expect(by_name["foo_resource_schema"]).to include("`foo_resources`").and include("`foo_list`")
+      end
+
+      it "rewrites sibling-tool references inside input schema property descriptions" do
+        list_definition = provider.tool_definitions(context).find { |d| d[:name] == "foo_list" }
+        resource_property = list_definition[:inputSchema][:properties][:resource]
+
+        expect(resource_property[:description]).to include("`foo_resources`")
+      end
+
+      it "preserves every non-prose input schema value through the rewrite walk" do
+        list_schema = provider.tool_definitions(context).find { |d| d[:name] == "foo_list" }[:inputSchema]
+
+        expect(list_schema[:required]).to eq(["resource"])
+        expect(list_schema[:properties][:fields][:type]).to eq(%w[array string])
+        expect(list_schema[:properties][:filter][:additionalProperties]).to be(true)
+        # Top-level custom (resource-specific) filters arrive as extra arguments.
+        expect(list_schema[:additionalProperties]).to be(true)
+        expect(list_schema[:type]).to eq("object")
       end
     end
   end

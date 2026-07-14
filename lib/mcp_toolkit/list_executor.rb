@@ -66,10 +66,20 @@ class McpToolkit::ListExecutor
     relation
   end
 
-  # Order by `id` when the primary key is numeric; otherwise by `created_at`
-  # (a non-numeric PK does not sort meaningfully).
+  # Order by `id` when the primary key is numeric; otherwise per
+  # `config.non_numeric_pk_order`: `created_at` with the primary key as a
+  # tiebreaker (default — rows bulk-inserted in one transaction share a
+  # `created_at`, and without a total order offset pagination could duplicate
+  # or skip rows), or the primary key alone for a host preserving a pre-gem
+  # order-by-id contract. `numeric_primary_key?` returning false guarantees the
+  # model exposes a non-nil primary key, so it can be read directly here.
   def apply_order(relation)
-    relation.order(numeric_primary_key? ? :id : :created_at)
+    return relation.order(:id) if numeric_primary_key?
+
+    pk = resource.model.primary_key.to_sym
+    return relation.order(pk) if McpToolkit.config.non_numeric_pk_order == :primary_key
+
+    relation.order(:created_at, pk)
   end
 
   def numeric_primary_key?
@@ -98,14 +108,44 @@ class McpToolkit::ListExecutor
 
     mapping = resource.filterable_columns
     validate_filter_keys!(filter, mapping)
+    validate_filter_companions!(filter)
 
     filter.each do |request_key, value|
-      next if value.nil? || value == ""
+      next if skipped_filter_value?(value)
 
       column = mapping[request_key.to_sym]
       relation = McpToolkit::Filtering.apply(relation, column, value)
     end
     relation
+  end
+
+  # Under :tokenized semantics an empty string means "no filter" (a JSON null
+  # still flows through as an IS NULL filter, like the "null" token — see
+  # McpToolkit::Filtering); under :literal every value reaches the WHERE clause
+  # verbatim.
+  def skipped_filter_value?(value)
+    value == "" && McpToolkit.config.bare_filter_value_semantics != :literal
+  end
+
+  # A filter key may declare a companion key it cannot be used without (e.g. a
+  # polymorphic foreign key is type-ambiguous without its `*_type`) — see
+  # Resource#filter_requirements. Rejected up front rather than producing a
+  # subtly wrong WHERE. A key whose value the apply loop will SKIP counts as
+  # not provided — a skipped ("" under :tokenized) companion must not satisfy
+  # the requirement, or the FK would be applied alone: exactly the
+  # type-ambiguous WHERE the requirement exists to prevent.
+  def validate_filter_companions!(filter)
+    requirements = resource.filter_requirements
+    return if requirements.empty?
+
+    provided = filter.reject { |_key, value| skipped_filter_value?(value) }.keys.map(&:to_sym)
+    requirements.each do |key, required|
+      next unless provided.include?(key)
+      next if provided.include?(required)
+
+      raise McpToolkit::Errors::InvalidParams,
+            "filter attribute #{key} requires #{required} to also be provided"
+    end
   end
 
   def validate_filter_keys!(filter, mapping)
@@ -123,6 +163,10 @@ class McpToolkit::ListExecutor
     return relation if params[:ids].blank?
 
     ids = params[:ids].to_s.split(",").map(&:strip).compact_blank
+    # Bound the IN-set the same way the per-attribute filters are bounded — the
+    # top-level `ids` param builds `WHERE id IN (...)` on its own path, so it
+    # must honor config.max_filter_values too (else it's an unbounded IN clause).
+    McpToolkit::Filtering.enforce_filter_limit!(ids.length, McpToolkit.config)
     ids.empty? ? relation : relation.where(id: ids)
   end
 

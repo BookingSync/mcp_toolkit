@@ -48,7 +48,7 @@ class McpToolkit::Tools::Get < McpToolkit::Tools::Base
     # the scope check (and so an unknown resource is a clean tool error).
     descriptor = resolve_descriptor(resource, config)
     required_scope = config.registry.required_scope_for(descriptor)
-    with_account(server_context, account_id:, required_scope:) do |scope_root|
+    with_account(server_context, account_id:, required_scope:, resource: descriptor) do |scope_root|
       McpToolkit::GetExecutor.call(resource: descriptor, scope_root:, id:, fields:)
     end
   rescue McpToolkit::Errors::InvalidParams => e

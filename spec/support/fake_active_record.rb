@@ -59,8 +59,8 @@ class FakeRelation
     end
   end
 
-  def order(column)
-    with_rows(@rows.sort_by { |row| row[column] })
+  def order(*columns)
+    with_rows(@rows.sort_by { |row| columns.map { |column| row[column] } })
   end
 
   def offset(n)
@@ -90,9 +90,11 @@ class FakeRelation
 
   private
 
+  # Mirrors ActiveRecord's hash-condition semantics: nil matches NULL rows, an
+  # Array matches ANY of its values (including a nil element matching NULL).
   def equality_match?(actual, value)
     if value.is_a?(Array)
-      value.map(&:to_s).include?(actual.to_s)
+      value.any? { |candidate| equality_match?(actual, candidate) }
     elsif value.nil?
       actual.nil?
     else
@@ -107,20 +109,24 @@ class FakeRelation
     value = predicate.value
 
     case predicate.operator
-    when "in" then Array(value).map(&:to_s).include?(actual.to_s)
-    when "not_eq" then actual.to_s != value.to_s
+    # Arel `IN (..., NULL)` never matches a NULL row, so nil elements are inert.
+    when "in" then Array(value).any? { |candidate| !candidate.nil? && actual.to_s == candidate.to_s }
+    when "not_eq" then value.nil? ? !actual.nil? : actual.to_s != value.to_s
     when "gt" then actual > value
     when "gteq" then actual >= value
     when "lt" then actual < value
     when "lteq" then actual <= value
     when "matches" then like_match?(actual, value)
     when "does_not_match" then !like_match?(actual, value)
-    else actual.to_s == value.to_s # "eq" fallback
+    else value.nil? ? actual.nil? : actual.to_s == value.to_s # "eq" (nil => IS NULL)
     end
   end
 
   # Translates a `%escaped%` LIKE pattern into a case-insensitive substring test.
+  # A nil pattern matches nothing (`LIKE NULL` in SQL), not everything.
   def like_match?(actual, pattern)
+    return false if pattern.nil?
+
     inner = pattern.to_s.gsub(/\A%|%\z/, "").gsub(/\\([\\%_])/, '\1')
     actual.to_s.downcase.include?(inner.downcase)
   end

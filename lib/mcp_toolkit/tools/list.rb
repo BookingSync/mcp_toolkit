@@ -15,11 +15,26 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
       - limit: page size (default 25, max 100)
       - offset: pagination offset (default 0)
 
-    Per-attribute equality filters:
-      - filter: an object of { <key>: <value> } exact-match filters, applied ON TOP of the
-        account scope (they can only narrow, never widen). Each resource advertises its
-        available filter keys via `resource_schema` (the `filters` array). Unknown keys are
-        rejected.
+    Per-attribute filters:
+      - filter: an object of { <key>: <value> } filters, applied ON TOP of the account scope
+        (they can only narrow, never widen). Each resource advertises its available filter keys
+        and operators via `resource_schema`. Unknown keys are rejected.
+      - A bare value matches by equality. A comma-separated string or an array of scalars
+        matches ANY of the values (IN), e.g. { "status": "booked,canceled" } or
+        { "status": ["booked", "canceled"] }. The string "null" (or a JSON null) matches
+        records where the value is NULL.
+      - An operator condition is an object { "op": <operator>, "value": <value> }, e.g.
+        { "price": { "op": "gteq", "value": 100 } }. An array of conditions ANDs them into a
+        range: { "price": [{ "op": "gteq", "value": 100 }, { "op": "lt", "value": 200 }] }.
+        Each attribute's supported operators are listed in `resource_schema`.
+      - Some filter keys require a companion key (e.g. a polymorphic id and its type) —
+        `resource_schema` advertises these under a relationship's `filter.requires`; pass
+        both keys together.
+
+    Resource-specific filters:
+      - Some resources accept additional filters advertised in `resource_schema` under
+        `resource_filters`. Pass each as a TOP-LEVEL argument (NOT inside `filter`), e.g.
+        { "resource": "...", "<name>": <value> }.
 
     Sparse fieldset:
       - fields: names of the attributes and/or relationships to include in each record, as an
@@ -50,8 +65,8 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
       },
       filter: {
         type: "object",
-        description: "Per-attribute exact-match equality filters, e.g. { \"booking_id\": 42 }. " \
-                     "See a resource's `resource_schema` `filters` for the keys it accepts.",
+        description: "Per-attribute filters, e.g. { \"booking_id\": 42 }. See a resource's " \
+                     "`resource_schema` `filters` for the keys and operators it accepts.",
         additionalProperties: true
       },
       limit: { type: "integer", description: "Page size (default 25, max 100)" },
@@ -65,7 +80,10 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
                      "resource's `resource_schema` for valid attribute and relationship names."
       }
     },
-    required: ["resource"]
+    required: ["resource"],
+    # Resource-specific filters (resource_schema's `resource_filters`) arrive as
+    # top-level arguments, so the schema must not advertise a closed shape.
+    additionalProperties: true
   )
 
   def self.call(server_context:, resource: nil, account_id: nil, **params)
@@ -74,7 +92,7 @@ class McpToolkit::Tools::List < McpToolkit::Tools::Base
     # the scope check (and so an unknown resource is a clean tool error).
     descriptor = resolve_descriptor(resource, config)
     required_scope = config.registry.required_scope_for(descriptor)
-    with_account(server_context, account_id:, required_scope:) do |scope_root|
+    with_account(server_context, account_id:, required_scope:, resource: descriptor) do |scope_root|
       McpToolkit::ListExecutor.call(resource: descriptor, scope_root:, params:)
     end
   rescue McpToolkit::Errors::InvalidParams => e

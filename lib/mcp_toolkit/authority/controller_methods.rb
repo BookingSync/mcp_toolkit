@@ -247,10 +247,25 @@ module McpToolkit::Authority::ControllerMethods
   # ---- request handling -----------------------------------------------
 
   def mcp_handle_batch(requests)
+    mcp_enforce_batch_limit!(requests)
     responses = requests.filter_map { |req| mcp_process_single_request(req) }
     return head :accepted if responses.empty?
 
     mcp_render_response(responses)
+  end
+
+  # Rejects an oversized JSON-RPC batch BEFORE any element runs. Rate limiting is
+  # a per-HTTP-request before_action, so without this an authenticated caller
+  # could fan out unbounded work (N tool executions / N blocking upstream calls)
+  # under a single rate-limit tick. Raised as a boundary Protocol::Error →
+  # rendered as a JSON-RPC error envelope (null id) by the rescue_from hook.
+  # `config.max_batch_size = nil` disables the cap.
+  def mcp_enforce_batch_limit!(requests)
+    max = mcp_config.max_batch_size
+    return if max.nil? || requests.size <= max
+
+    raise McpToolkit::Protocol::InvalidRequest,
+          "JSON-RPC batch too large: #{requests.size} requests exceeds the maximum of #{max}"
   end
 
   def mcp_handle_single(request_data)

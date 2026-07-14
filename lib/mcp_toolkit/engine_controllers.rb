@@ -49,10 +49,18 @@ module McpToolkit
     end
   end
 
-  # The SATELLITE transport controller the engine mounts (unchanged behavior; the
-  # SDK-backed path). Built lazily only so its parent is read after config.
+  # The transport controller the engine mounts at POST/GET/DELETE /mcp, chosen by
+  # ROLE so a single `mount McpToolkit::Engine => "/mcp"` works for either kind of
+  # host: an AUTHORITY (`auth_role == :authority`) gets the hand-rolled dispatcher
+  # path (Authority::ControllerMethods — local token auth, gateway proxying, usage
+  # metering, rate limiting), a SATELLITE (the default) gets the SDK-backed path
+  # (Transport::ControllerMethods, which forwards tokens to a central app). Built
+  # lazily so both `config.parent_controller` and `config.auth_role` are read after
+  # the host's initializer/to_prepare has run. A host that would rather draw its own
+  # routes still subclasses McpToolkit::Authority::ServerController directly.
   def self.build_server_controller(parent)
-    Class.new(parent) { include McpToolkit::Transport::ControllerMethods }
+    concern = config.authority? ? McpToolkit::Authority::ControllerMethods : McpToolkit::Transport::ControllerMethods
+    Class.new(parent) { include concern }
   end
 
   # The AUTHORITY introspection endpoint the engine mounts at

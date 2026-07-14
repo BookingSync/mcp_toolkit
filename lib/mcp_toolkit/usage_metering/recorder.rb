@@ -65,17 +65,43 @@ class McpToolkit::UsageMetering::Recorder
   end
 
   # `config.usage_flusher` target. Persists the request's accumulated events via the
-  # sink in one shot. No-op when nothing was accumulated.
+  # sink in one shot. No-op when nothing was accumulated. If the batch write fails,
+  # falls back to per-event writes so one un-persistable ("poison") event can't drop
+  # metering for the whole request.
   def flush(controller:)
     events = buffer_for(controller)
     return if events.empty?
 
     @sink.call(events)
   rescue StandardError => e
-    report("failed to flush #{events&.size} event(s)", e)
+    flush_individually(events, e)
   end
 
   private
+
+  # The batch write failed. Retry each event on its own so a single un-persistable
+  # event (a constraint violation, bad encoding) loses ONLY itself instead of
+  # dropping every sibling call's metering — which a caller could otherwise
+  # exploit to evade billing for a whole batch by appending one poison call.
+  # Assumes the batch sink is atomic (nothing persisted on failure — true for
+  # `insert_all`); a non-atomic sink could double-write the events that did land,
+  # so this stays a fallback, not the default path.
+  def flush_individually(events, batch_error)
+    @logger&.warn(
+      "MCP usage tracking: batch flush of #{events.size} event(s) failed " \
+      "(#{batch_error.message}), retrying individually"
+    )
+    events.each do |event|
+      @sink.call([event])
+    rescue StandardError => e
+      report("dropped 1 unpersistable usage event", e)
+    end
+  rescue StandardError
+    # Metering MUST NEVER affect the MCP response. `flush` already runs this from
+    # its rescue, so a raise here (e.g. a misbehaving logger or error_reporter)
+    # would escape into the after_action. Swallow it as the last resort.
+    nil
+  end
 
   def scrub(arguments)
     hash = arguments.to_h

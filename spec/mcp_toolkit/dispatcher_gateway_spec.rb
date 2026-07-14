@@ -111,12 +111,18 @@ RSpec.describe McpToolkit::Dispatcher do
       expect(response[:error]).to eq(code: -32_050, message: "nope", data: { "x" => 1 })
     end
 
-    it "maps a transport-level upstream failure (no jsonrpc_error) to internal_error" do
-      allow(proxy).to receive(:call).and_raise(McpToolkit::Gateway::UpstreamCallError.new("timed out"))
+    it "maps a transport-level upstream failure (no jsonrpc_error) to a GENERIC internal error (no host:port leak)" do
+      allow(proxy).to receive(:call).and_raise(
+        McpToolkit::Gateway::UpstreamCallError.new(
+          "upstream notifications request failed: Failed to open TCP connection to notif.internal:9292 (Connection refused)"
+        )
+      )
 
       response = dispatcher.handle_request(request("tools/call", { "name" => "notifications__send_email", "arguments" => {} }))
 
       expect(response[:error][:code]).to eq(McpToolkit::Protocol::ErrorCodes::INTERNAL_ERROR)
+      expect(response[:error][:message]).to eq("Internal error")
+      expect(response[:error][:message]).not_to include("notif.internal")
     end
 
     it "maps an unknown upstream to method-not-found" do

@@ -23,6 +23,43 @@ RSpec.describe McpToolkit::Gateway::Aggregator do
       ])
     end
 
+    context "when the upstream prose references its own generic tools" do
+      let(:tools) do
+        [{
+          "name" => "list",
+          "description" => "Fetch records. Use the `resources` tool to discover resources and " \
+                           "`resource_schema` to learn a shape.",
+          "inputSchema" => {
+            "type" => "object",
+            "properties" => {
+              "resource" => { "type" => "string", "description" => "Use the `resources` tool." }
+            },
+            "required" => ["resource"]
+          }
+        }]
+      end
+
+      # A proxied `list` telling a client to "use the `resources` tool" points at a
+      # tool that does not exist on the gateway — only `notifications__resources` does.
+      it "rewrites backticked tool references to the namespaced names, in prose AND input schema" do
+        definition = aggregator.tool_definitions.first
+
+        expect(definition["name"]).to eq("notifications__list")
+        expect(definition["description"])
+          .to include("`notifications__resources`").and include("`notifications__resource_schema`")
+        expect(definition["inputSchema"]["properties"]["resource"]["description"])
+          .to include("`notifications__resources`")
+        expect(definition["inputSchema"]["required"]).to eq(["resource"])
+      end
+
+      it "does not mutate the upstream's original definition" do
+        aggregator.tool_definitions
+
+        expect(tools.first["description"]).to include("`resources`")
+        expect(tools.first["name"]).to eq("list")
+      end
+    end
+
     it "forwards the bearer token to the client (used on a cache miss)" do
       aggregator.tool_definitions(bearer_token: "tok-9")
 
@@ -148,6 +185,35 @@ RSpec.describe McpToolkit::Gateway::Aggregator do
 
         cached = McpToolkit.config.cache_store.read("#{described_class::CACHE_KEY_PREFIX}notifications")
         expect(cached).to be_nil
+      end
+    end
+
+    context "when an upstream returns a malformed tool entry" do
+      it "skips a non-Hash entry and keeps the valid ones (does not error the whole list)" do
+        allow(client).to receive(:tools_list).and_return([
+          { "name" => "send_email", "description" => "Send", "inputSchema" => { "type" => "object" } },
+          "not-a-tool"
+        ])
+
+        expect(aggregator.tool_definitions.map { |d| d["name"] }).to eq(["notifications__send_email"])
+      end
+
+      it "skips a Hash entry without a name" do
+        allow(client).to receive(:tools_list).and_return([{ "description" => "nameless" }])
+
+        expect(aggregator.tool_definitions).to eq([])
+      end
+
+      it "keeps sibling upstreams when one upstream's entry is malformed" do
+        McpToolkit.config.register_upstream(key: "billing", url: "https://billing.test/mcp")
+        allow(McpToolkit::Gateway::Client).to receive(:new) do |upstream:, **|
+          instance_double(McpToolkit::Gateway::Client).tap do |c|
+            list = upstream.key == "notifications" ? ["bogus"] : [{ "name" => "charge", "description" => "d", "inputSchema" => {} }]
+            allow(c).to receive(:tools_list).and_return(list)
+          end
+        end
+
+        expect(aggregator.tool_definitions.map { |d| d["name"] }).to eq(["billing__charge"])
       end
     end
 

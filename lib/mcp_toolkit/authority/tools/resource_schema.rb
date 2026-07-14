@@ -16,7 +16,14 @@ class McpToolkit::Authority::Tools::ResourceSchema < McpToolkit::Authority::Tool
       - relationships: associated resources emitted in the record's `links`; each names the
         `target_resource` it resolves to (callable via `list`/`get`)
       - standard_filters: ids, updated_since, limit, offset (accepted by the `list` tool)
-      - filters: the per-attribute equality filter keys the `list` tool accepts
+      - filters: the per-attribute equality/operator filter keys the `list` tool accepts in
+        its `filter` argument
+      - resource_filters: resource-specific filters, if any — each is passed as a TOP-LEVEL
+        argument of the `list` tool (NOT inside `filter`), e.g. { "resource": "...",
+        "<name>": <value> }
+      - filter_examples: ready-to-use `filter` payloads for this resource
+    A relationship's `filter` block lists the keys that filter by it; when it names a
+    `requires` key (e.g. a polymorphic id needing its type), pass BOTH keys together.
     The `attributes` and `relationships` names are also the valid values for the `fields` sparse
     fieldset argument on `get` / `list`. Call this before `list` to learn a resource's shape.
   DESC
@@ -34,7 +41,8 @@ class McpToolkit::Authority::Tools::ResourceSchema < McpToolkit::Authority::Tool
     }
   )
 
-  def call(context:, resource: nil, **_args)
+  def call(context:, resource: nil, **extra)
+    reject_unknown_arguments!(extra.except(:account_id))
     descriptor = resolve_descriptor(resource)
     ensure_resource_accessible!(descriptor, context)
     ensure_scope!(descriptor, context)
