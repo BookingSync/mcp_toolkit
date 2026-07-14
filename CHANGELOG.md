@@ -2,7 +2,29 @@
 
 Authority-path discoverability + backward-compatibility work (driven by an
 adopting host's parity review against the API contract the gem replaced), plus a
-role-aware mountable engine so an authority mounts its transport in one line.
+role-aware mountable engine so an authority mounts its transport in one line, and
+filter-path hardening from a security review.
+
+### Security
+
+- `config.filter_operator_overrides` now rejects, at assignment time, any
+  operator outside `Filtering::AREL_PREDICATIONS`. Those are the only operators
+  the gem maps onto an Arel predication that binds/quotes its value; a host that
+  configured anything else (e.g. `"extract"`) would have it `public_send` to an
+  Arel attribute with the request value passed through verbatim — an
+  SQL-injection surface. A defense-in-depth guard in `Filtering.predicate_for`
+  also refuses to dispatch any non-predication operator, so the metaprogramming
+  call can never be reached with an unvetted method name. The default and
+  intended (`{ text: %w[eq in] }`-style) configurations were never vulnerable.
+- New `config.max_filter_values` (default `500`, `nil` disables) caps how many
+  values an IN-set filter may resolve to and how many operator conditions may be
+  ANDed on one attribute, so a valid token can't emit an unbounded IN clause /
+  AND-chain (oversized SQL + Arel AST + expensive planning). Rate limiting
+  remains opt-in via `config.rate_limit_max_requests`.
+- Added an injection-safety regression spec that renders real Arel SQL through a
+  correctly-escaping connection and asserts hostile payloads stay inside escaped
+  string literals (the prior fake connection did not escape quotes, so it could
+  not have caught an escaping regression).
 
 ### Added
 

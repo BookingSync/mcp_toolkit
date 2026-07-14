@@ -211,7 +211,43 @@ class McpToolkit::Configuration
   # (the gem's own sets apply).
   #
   # @return [Hash{Symbol => Array<String>}]
-  attr_accessor :filter_operator_overrides
+  attr_reader :filter_operator_overrides
+
+  # Assigns per-type operator overrides, rejecting any operator the gem cannot
+  # safely dispatch. Only McpToolkit::Filtering::AREL_PREDICATIONS map onto an
+  # Arel predication that binds/quotes its value; anything else (e.g. "extract")
+  # would be public_send to an Arel attribute with the request value passed
+  # through VERBATIM — an SQL-injection surface. Fail fast at config time so a
+  # typo can never open that door at request time.
+  def filter_operator_overrides=(overrides)
+    overrides ||= {}
+    unless overrides.is_a?(Hash)
+      raise ArgumentError,
+            "filter_operator_overrides must be a Hash of { column_type => [operator, ...] }, " \
+            "got #{overrides.class}"
+    end
+
+    overrides.each do |type, operators|
+      unsupported = Array(operators).map(&:to_s) - McpToolkit::Filtering::AREL_PREDICATIONS
+      next if unsupported.empty?
+
+      raise ArgumentError,
+            "filter_operator_overrides[#{type.inspect}] has unsupported operator(s): " \
+            "#{unsupported.join(", ")}. Allowed: #{McpToolkit::Filtering::AREL_PREDICATIONS.join(", ")}."
+    end
+
+    @filter_operator_overrides = overrides
+  end
+
+  # Caps how many values an IN-set filter may resolve to, and how many operator
+  # conditions may be ANDed on a single attribute, so a valid token can't emit
+  # an unbounded IN clause / AND-chain (oversized SQL + Arel AST and expensive
+  # planning; rate limiting is opt-in via rate_limit_max_requests). Applies to
+  # the default :tokenized bare-value semantics and to { op:, value: }
+  # conditions. nil disables the cap.
+  #
+  # @return [Integer, nil]
+  attr_accessor :max_filter_values
 
   # --- protocol / transport --------------------------------------------------
 
@@ -420,6 +456,7 @@ class McpToolkit::Configuration
     @bare_filter_value_semantics = :tokenized
     @non_numeric_pk_order = :created_at
     @filter_operator_overrides = {}
+    @max_filter_values = 500
   end
 
   # The default authority tool catalog when no explicit `tool_provider` is

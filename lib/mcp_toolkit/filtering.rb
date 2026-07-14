@@ -64,6 +64,7 @@ module McpToolkit::Filtering
     if compound?(value)
       apply_condition(relation, column, value, config:)
     elsif collection?(value)
+      enforce_filter_limit!(value.length, config)
       value.inject(relation) { |rel, condition| apply_condition(rel, column, condition, config:) }
     elsif mixed_collection?(value)
       raise McpToolkit::Errors::InvalidParams,
@@ -86,7 +87,7 @@ module McpToolkit::Filtering
     end
     return value if config.bare_filter_value_semantics == :literal
 
-    equality_value(value)
+    equality_value(value, config:)
   end
 
   # A single operator-based condition, e.g. { op: "gt", value: 1000 }.
@@ -167,12 +168,25 @@ module McpToolkit::Filtering
   # test fake) receives a portable Predicate value object it knows how to apply.
   def self.predicate_for(relation, column, operator, raw, config:)
     value = normalize_value(operator, raw, config:)
+    method = arel_operator(operator, value)
+
+    # Defense in depth: only a known-safe Arel predication may ever reach
+    # public_send. operators_for/validate_operator! already gate this and
+    # config.filter_operator_overrides is validated at assignment — but the
+    # value handed to any operator outside eq/in/matches is passed through
+    # VERBATIM (normalize_value's else branch), so an operator that slipped in
+    # (e.g. a host-configured "extract") must never be dispatched: Arel would
+    # interpolate the request value as raw SQL. This is the last guard before
+    # the metaprogramming call.
+    unless AREL_PREDICATIONS.include?(method)
+      raise McpToolkit::Errors::InvalidParams, "'#{operator}' is not a supported filter operator"
+    end
 
     model = relation.respond_to?(:model) ? relation.model : nil
     if model.respond_to?(:arel_table)
-      model.arel_table[column.to_sym].public_send(arel_operator(operator, value), value)
+      model.arel_table[column.to_sym].public_send(method, value)
     else
-      Predicate.new(column.to_sym, arel_operator(operator, value), value)
+      Predicate.new(column.to_sym, method, value)
     end
   end
 
@@ -201,7 +215,7 @@ module McpToolkit::Filtering
 
     case operator
     when "eq", "in"
-      resolved = equality_value(raw)
+      resolved = equality_value(raw, config:)
       resolved.is_a?(Array) ? resolved : [resolved]
     when "matches", "does_not_match"
       "%#{config.sql_sanitizer.sanitize_sql_like(raw.to_s)}%"
@@ -215,8 +229,8 @@ module McpToolkit::Filtering
   # Array => an IN set of non-null scalars (see .equality_value_set). Any other
   # non-scalar (an op-less Hash) is rejected — passed through it would reach the
   # database as a malformed condition.
-  def self.equality_value(value)
-    return equality_value_set(value) if value.is_a?(Array)
+  def self.equality_value(value, config: McpToolkit.config)
+    return equality_value_set(value, config:) if value.is_a?(Array)
     return nil if value.nil? || value.to_s == NULL_TOKEN
 
     if value.is_a?(Hash)
@@ -226,7 +240,11 @@ module McpToolkit::Filtering
     end
 
     str = value.to_s
-    str.include?(",") ? str.split(",") : value
+    return value unless str.include?(",")
+
+    parts = str.split(",")
+    enforce_filter_limit!(parts.length, config)
+    parts
   end
 
   # Resolves an Array filter value into a flat IN set. Elements must be non-null
@@ -236,8 +254,8 @@ module McpToolkit::Filtering
   # element is a malformed condition either way. The `"null"` token is NOT
   # resolved inside a set for the same reason: it stays a literal string, and a
   # null-or-nothing condition is expressed as a scalar filter value instead.
-  def self.equality_value_set(values)
-    values.flat_map do |element|
+  def self.equality_value_set(values, config: McpToolkit.config)
+    resolved = values.flat_map do |element|
       if element.nil? || element.is_a?(Array) || element.is_a?(Hash)
         raise McpToolkit::Errors::InvalidParams,
               "an IN-set filter must contain only non-null scalar values; " \
@@ -247,6 +265,22 @@ module McpToolkit::Filtering
       str = element.to_s
       str.include?(",") ? str.split(",") : [element]
     end
+    enforce_filter_limit!(resolved.length, config)
+    resolved
+  end
+
+  # Bounds how many values an IN-set resolves to (and how many operator
+  # conditions may be ANDed on one attribute, enforced by .apply), so a valid
+  # token can't emit an unbounded IN clause / AND-chain — oversized SQL + Arel
+  # AST and expensive query planning, which matters because rate limiting is
+  # opt-in (config.rate_limit_max_requests). Disabled when
+  # config.max_filter_values is nil.
+  def self.enforce_filter_limit!(count, config)
+    max = config.max_filter_values
+    return if max.nil? || count <= max
+
+    raise McpToolkit::Errors::InvalidParams,
+          "a filter may carry at most #{max} values or conditions (got #{count})"
   end
 
   # Portable representation of an operator predicate, applied by the in-memory

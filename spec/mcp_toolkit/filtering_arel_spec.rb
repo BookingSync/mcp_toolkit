@@ -11,7 +11,10 @@ require "active_record"
 # of it.
 RSpec.describe McpToolkit::Filtering do
   # The minimal quoting surface Arel::Visitors::ToSql needs; matches the
-  # ANSI-style quoting real adapters produce for these literals.
+  # ANSI-style quoting real adapters produce for these literals — INCLUDING
+  # doubling embedded single quotes, so a hostile payload renders as an escaped
+  # string literal rather than breaking out. A non-escaping fake would make the
+  # injection-safety examples below pass vacuously (Codex review, 07-14).
   let(:fake_connection) do
     Class.new do
       def quote_table_name(name) = %("#{name}")
@@ -20,7 +23,7 @@ RSpec.describe McpToolkit::Filtering do
       def quote(value)
         case value
         when nil then "NULL"
-        when String then "'#{value}'"
+        when String then "'#{value.gsub("'", "''")}'"
         else value.to_s
         end
       end
@@ -114,6 +117,83 @@ RSpec.describe McpToolkit::Filtering do
       described_class.apply(relation, :name, %w[a b])
 
       expect(relation.last_predicate).to eq(name: %w[a b])
+    end
+  end
+
+  # Injection-safety regression tests (Codex review, 07-14). These render REAL
+  # Arel SQL through a correctly-escaping connection, so a payload that tried to
+  # break out of a string literal would show up as broken (un-doubled) SQL here.
+  describe "injection safety" do
+    it "keeps a quote-breakout eq payload inside an escaped string literal" do
+      sql = sql_for(:name, { op: "eq", value: "x') OR 1=1 --" })
+
+      expect(sql).to eq(%q{"widgets"."name" IN ('x'') OR 1=1 --')})
+    end
+
+    it "hands a hostile bare value to ActiveRecord as data, never spliced into SQL" do
+      described_class.apply(relation, :name, "x' OR 1=1 --")
+
+      expect(relation.last_predicate).to eq(name: "x' OR 1=1 --")
+    end
+
+    it "escapes LIKE wildcards (sanitizer) and quotes (adapter) in a matches value" do
+      sql = sql_for(:name, { op: "matches", value: "50%_off'" })
+
+      expect(sql).to include('\%').and(include('\_')).and(include("''"))
+    end
+
+    # The dangerous seam: a host-configured operator outside the safe Arel
+    # predications would be public_send to an attribute with the request value
+    # passed through verbatim (Codex's `extract` example). Both guards below
+    # must hold.
+    it "refuses to dispatch an operator outside the Arel predications (predicate_for guard)" do
+      expect { described_class.predicate_for(relation, :name, "extract", "epoch", config: McpToolkit.config) }
+        .to raise_error(McpToolkit::Errors::InvalidParams, /not a supported filter operator/)
+    end
+
+    it "rejects an unsafe operator override at config time (config guard)" do
+      expect { McpToolkit.configure { |c| c.filter_operator_overrides = { datetime: ["extract"] } } }
+        .to raise_error(ArgumentError, /unsupported operator/)
+    end
+
+    it "accepts an override that restricts to safe predications" do
+      expect { McpToolkit.configure { |c| c.filter_operator_overrides = { text: %w[eq in] } } }
+        .not_to raise_error
+    end
+  end
+
+  describe "max_filter_values caps unbounded IN sets and condition arrays" do
+    it "rejects an IN set larger than the cap" do
+      McpToolkit.configure { |c| c.max_filter_values = 3 }
+
+      expect { described_class.apply(relation, :name, { op: "in", value: %w[a b c d] }) }
+        .to raise_error(McpToolkit::Errors::InvalidParams, /at most 3 values/)
+    end
+
+    it "rejects a comma-tokenized bare value larger than the cap" do
+      McpToolkit.configure { |c| c.max_filter_values = 2 }
+
+      expect { described_class.apply(relation, :name, "a,b,c") }
+        .to raise_error(McpToolkit::Errors::InvalidParams, /at most 2 values/)
+    end
+
+    it "rejects a condition array longer than the cap" do
+      McpToolkit.configure { |c| c.max_filter_values = 1 }
+
+      expect { described_class.apply(relation, :price, [{ op: "gteq", value: 1 }, { op: "lt", value: 9 }]) }
+        .to raise_error(McpToolkit::Errors::InvalidParams, /at most 1 values or conditions/)
+    end
+
+    it "allows a set within the cap" do
+      McpToolkit.configure { |c| c.max_filter_values = 3 }
+
+      expect { described_class.apply(relation, :name, { op: "in", value: %w[a b c] }) }.not_to raise_error
+    end
+
+    it "does not cap when nil" do
+      McpToolkit.configure { |c| c.max_filter_values = nil }
+
+      expect { described_class.apply(relation, :name, { op: "in", value: %w[a b c d e f] }) }.not_to raise_error
     end
   end
 end
