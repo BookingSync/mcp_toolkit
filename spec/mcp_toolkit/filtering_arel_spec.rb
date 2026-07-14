@@ -195,5 +195,29 @@ RSpec.describe McpToolkit::Filtering do
 
       expect { described_class.apply(relation, :name, { op: "in", value: %w[a b c d e f] }) }.not_to raise_error
     end
+
+    # Regression (Codex review, 07-14): under :literal semantics the bare value
+    # was handed to WHERE verbatim BEFORE the cap ran, so an oversized Array still
+    # built an unbounded `IN (...)`. The cap must apply to the Array on either path.
+    it "rejects an oversized Array bare value under :literal semantics" do
+      McpToolkit.configure do |c|
+        c.bare_filter_value_semantics = :literal
+        c.max_filter_values = 3
+      end
+
+      expect { described_class.apply(relation, :name, %w[a b c d]) }
+        .to raise_error(McpToolkit::Errors::InvalidParams, /at most 3 values/)
+    end
+
+    it "allows an Array bare value within the cap under :literal semantics" do
+      McpToolkit.configure do |c|
+        c.bare_filter_value_semantics = :literal
+        c.max_filter_values = 3
+      end
+
+      described_class.apply(relation, :name, %w[a b c])
+
+      expect(relation.last_predicate).to eq(name: %w[a b c])
+    end
   end
 end

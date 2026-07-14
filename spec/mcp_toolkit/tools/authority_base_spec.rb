@@ -59,9 +59,25 @@ RSpec.describe McpToolkit::Tools::AuthorityBase do
       expect(result).to eq(id: "w1", account_id: 99, principal_present: true, bearer: "tok")
     end
 
-    it "maps a missing required keyword (ArgumentError) to InvalidParams" do
+    it "maps a missing required keyword (ArgumentError) to InvalidParams, surfacing the binding hint" do
       expect { tool_class.call(context:) }
-        .to raise_error(McpToolkit::Protocol::InvalidParams)
+        .to raise_error(McpToolkit::Protocol::InvalidParams, /missing keyword: :id/)
+    end
+
+    # Regression (Codex review, 07-14): only Ruby's own kwarg-binding
+    # ArgumentErrors are safe to relay. An ArgumentError raised from INSIDE the
+    # tool's business logic can carry SQL/values/internal detail, so it must be
+    # sanitized to a generic InternalError, not returned verbatim as InvalidParams.
+    it "sanitizes a business-logic ArgumentError to a GENERIC InternalError (no message leak)" do
+      logger = instance_double(Logger, error: nil)
+      McpToolkit.config.logger = logger
+      exploding = Class.new(described_class) do
+        def call(**) = raise(ArgumentError, "invalid value for Integer(): \"SELECT * FROM secrets\"")
+      end
+
+      expect { exploding.call(context:) }
+        .to raise_error(McpToolkit::Protocol::InternalError, "Internal error")
+      expect(logger).to have_received(:error).with(/invalid value for Integer/)
     end
 
     it "maps an unexpected StandardError to a GENERIC InternalError (no message leak)" do

@@ -85,6 +85,14 @@ module McpToolkit::Filtering
             "unsupported filter value; use a bare scalar, an array of scalars, " \
             "or { op:, value: } condition(s)"
     end
+
+    # An Array bare value renders as `WHERE column IN (...)` under EITHER
+    # semantics, so bound its size before the branch below. The :literal path
+    # returns the array verbatim and would otherwise skip the limit that
+    # equality_value/equality_value_set enforce only on the :tokenized path —
+    # defeating the query-complexity guard on the new host-compatibility path.
+    enforce_filter_limit!(value.length, config) if value.is_a?(Array)
+
     return value if config.bare_filter_value_semantics == :literal
 
     equality_value(value, config:)

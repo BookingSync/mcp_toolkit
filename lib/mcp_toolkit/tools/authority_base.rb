@@ -105,6 +105,15 @@ class McpToolkit::Tools::AuthorityBase
     raise McpToolkit::Protocol::InvalidRequest, "#{resource.name} is restricted to superuser (user-scoped) MCP tokens"
   end
 
+  # ArgumentErrors Ruby itself raises while binding the request arguments to the
+  # subclass's `#call` signature: a missing/unknown keyword or wrong arity. Their
+  # messages carry only keyword names (the tool's own declared params) and counts,
+  # so surfacing them tells a client how to fix the call. Every OTHER ArgumentError
+  # is raised from inside the tool's business logic (e.g. `Integer("x")`) and its
+  # message may carry SQL, internal class names, or a value — so it is sanitized
+  # like any unexpected error rather than relayed verbatim.
+  ARGUMENT_BINDING_ERROR_MESSAGE = /\A(missing keyword|unknown keyword|wrong number of arguments)/
+
   # Runs the tool's business logic (the subclass's `#call`) with error mapping.
   # Arrives with symbol-keyed arguments from the dispatcher.
   def execute(**arguments)
@@ -114,18 +123,26 @@ class McpToolkit::Tools::AuthorityBase
     # (e.g. InvalidParams); let it bubble untouched so the client sees it.
     raise
   rescue ArgumentError => e
-    raise McpToolkit::Protocol::InvalidParams, e.message
+    raise McpToolkit::Protocol::InvalidParams, e.message if ARGUMENT_BINDING_ERROR_MESSAGE.match?(e.message)
+
+    raise sanitized_internal_error(e)
   rescue StandardError => e
-    # An UNEXPECTED error's message may carry SQL, internal class names, or a
-    # hostname — it must not reach the caller (the dispatcher relays a
-    # Protocol::Error's message verbatim). Log the detail; return a generic error.
-    McpToolkit.config.logger&.error("MCP tool #{self.class} error: #{e.message}\n#{e.backtrace&.join("\n")}")
-    raise McpToolkit::Protocol::InternalError, "Internal error"
+    raise sanitized_internal_error(e)
   end
 
   # The subclass implements its business logic here, receiving the tool arguments
   # as keywords and returning a Hash or String.
   def call(**_arguments)
     raise NotImplementedError, "#{self.class} must implement #call"
+  end
+
+  private
+
+  # An UNEXPECTED error's message may carry SQL, internal class names, or a
+  # hostname — it must not reach the caller (the dispatcher relays a
+  # Protocol::Error's message verbatim). Log the detail; return a generic error.
+  def sanitized_internal_error(error)
+    McpToolkit.config.logger&.error("MCP tool #{self.class} error: #{error.message}\n#{error.backtrace&.join("\n")}")
+    McpToolkit::Protocol::InternalError.new("Internal error")
   end
 end
