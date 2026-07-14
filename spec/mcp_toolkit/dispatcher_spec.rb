@@ -212,4 +212,18 @@ RSpec.describe McpToolkit::Dispatcher do
       expect(logger).to have_received(:error).with(/sensitive: SELECT \* FROM secrets/)
     end
   end
+
+  describe "tool argument handling" do
+    it "ignores a caller-supplied `context` argument (no auth-context injection)" do
+      response = dispatcher.handle_request(
+        request("tools/call", { "name" => "echo", "arguments" => { "context" => { "superuser" => true }, "foo" => 1 } })
+      )
+
+      # The tool ran with the REAL resolved context (account 42), not the injected
+      # hash, and the reserved `context` key was stripped from the arguments.
+      payload = JSON.parse(response[:result][:content].first[:text], symbolize_names: true)
+      expect(payload[:account_id]).to eq(42)
+      expect(payload[:echoed]).to eq(foo: 1)
+    end
+  end
 end

@@ -193,8 +193,13 @@ class McpToolkit::Dispatcher
   # JSON gives string keys; a tool's `call(context:, **arguments)` needs symbol
   # keys for the keyword splat. Deep-symbolized so nested argument hashes reach
   # the tool in the same shape a symbol-keyed caller would pass.
+  #
+  # `context` is stripped: a tool is invoked as `call(context:, **arguments)`, and
+  # a splatted keyword OVERRIDES the explicit one, so a caller-supplied `context`
+  # argument would replace the gem-resolved Authority::Context with attacker JSON
+  # (auth-context injection). `context` is never a legitimate tool argument.
   def symbolized_arguments(arguments)
-    arguments.to_h.deep_symbolize_keys
+    arguments.to_h.deep_symbolize_keys.except(:context)
   end
 
   def ensure_tool_scope!(tool)
@@ -232,7 +237,12 @@ class McpToolkit::Dispatcher
         data: error.jsonrpc_error["data"]
       )
     else
-      McpToolkit::Protocol::InternalError.new(error.message)
+      # A TRANSPORT failure (no upstream JSON-RPC error): its message embeds the
+      # internal upstream host:port (Faraday/Net::HTTP "Failed to open TCP
+      # connection to <host>:<port>"). The proxy already logged the detail
+      # (Gateway::Proxy#log_proxied_failure), so relay only a generic error —
+      # never the internal topology — to the caller.
+      McpToolkit::Protocol::InternalError.new("Internal error")
     end
   end
 end

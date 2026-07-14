@@ -162,5 +162,17 @@ RSpec.describe McpToolkit::UsageMetering::Recorder do
       expect(persisted.map { |e| e[:tool] }).to eq(["good"])
       expect(reported.map(&:message)).to eq(["constraint"])
     end
+
+    it "never lets a misbehaving logger or error_reporter escape (metering can't break the response)" do
+      boom_logger = instance_double(Logger)
+      allow(boom_logger).to receive(:warn).and_raise("logger down")
+      recorder = described_class.new(
+        event_builder:, sink: ->(_) { raise "sink down" },
+        logger: boom_logger, error_reporter: ->(_) { raise "reporter down" }
+      )
+      recorder.record(request_data: tools_call, account:, principal:, controller:)
+
+      expect { recorder.flush(controller:) }.not_to raise_error
+    end
   end
 end

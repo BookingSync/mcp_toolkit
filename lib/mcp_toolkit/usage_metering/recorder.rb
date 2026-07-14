@@ -96,6 +96,11 @@ class McpToolkit::UsageMetering::Recorder
     rescue StandardError => e
       report("dropped 1 unpersistable usage event", e)
     end
+  rescue StandardError
+    # Metering MUST NEVER affect the MCP response. `flush` already runs this from
+    # its rescue, so a raise here (e.g. a misbehaving logger or error_reporter)
+    # would escape into the after_action. Swallow it as the last resort.
+    nil
   end
 
   def scrub(arguments)

@@ -50,6 +50,24 @@ filter-path hardening from a security review.
   so a superuser-only resource served via a satellite was readable/discoverable
   by any valid token (still account-scoped, so not cross-tenant). `get`/`list`/
   `resource_schema` refuse it for a non-superuser; `resources` hides it.
+- The authority dispatcher now strips a caller-supplied `context` from a tool's
+  arguments before the keyword splat. `tool.call(context:, **arguments)` let a
+  splatted `context` argument OVERRIDE the gem-resolved `Authority::Context`
+  (auth-context injection) — harmless for the gem's own tools (a JSON context
+  fails closed with a NoMethodError) but the gem handed attacker-controlled data
+  as `context` to arbitrary host tools.
+- The gateway's transport-failure relay no longer leaks the internal upstream
+  host:port. `translate_upstream_call_error` returned `InternalError.new(error.message)`
+  for a transport failure, whose message is `"Failed to open TCP connection to
+  <host>:<port>"`; it now returns a generic error (the proxy already logs the
+  detail). A first-party upstream JSON-RPC error is still relayed verbatim.
+- `Tools::AuthorityBase#execute` no longer relays an unexpected exception's
+  message to the caller — it returns a generic "Internal error" (detail logged),
+  matching the dispatcher's own catch-all.
+- Usage metering's per-event flush fallback now cannot escape into the response:
+  a misbehaving `logger`/`error_reporter` in `flush_individually` is swallowed as
+  a last resort, preserving the "metering never affects the MCP response"
+  invariant.
 
 ### Added
 

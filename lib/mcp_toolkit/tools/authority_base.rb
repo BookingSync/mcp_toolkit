@@ -116,7 +116,11 @@ class McpToolkit::Tools::AuthorityBase
   rescue ArgumentError => e
     raise McpToolkit::Protocol::InvalidParams, e.message
   rescue StandardError => e
-    raise McpToolkit::Protocol::InternalError, e.message
+    # An UNEXPECTED error's message may carry SQL, internal class names, or a
+    # hostname — it must not reach the caller (the dispatcher relays a
+    # Protocol::Error's message verbatim). Log the detail; return a generic error.
+    McpToolkit.config.logger&.error("MCP tool #{self.class} error: #{e.message}\n#{e.backtrace&.join("\n")}")
+    raise McpToolkit::Protocol::InternalError, "Internal error"
   end
 
   # The subclass implements its business logic here, receiving the tool arguments

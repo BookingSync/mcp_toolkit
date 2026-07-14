@@ -64,10 +64,20 @@ RSpec.describe McpToolkit::Tools::AuthorityBase do
         .to raise_error(McpToolkit::Protocol::InvalidParams)
     end
 
-    it "maps an unexpected StandardError to InternalError" do
-      exploding = Class.new(described_class) { def call(**) = raise("kaboom") }
+    it "maps an unexpected StandardError to a GENERIC InternalError (no message leak)" do
+      exploding = Class.new(described_class) { def call(**) = raise("kaboom: SELECT * FROM secrets") }
 
-      expect { exploding.call(context:) }.to raise_error(McpToolkit::Protocol::InternalError, /kaboom/)
+      expect { exploding.call(context:) }
+        .to raise_error(McpToolkit::Protocol::InternalError, "Internal error")
+    end
+
+    it "logs the real error detail server-side" do
+      logger = instance_double(Logger, error: nil)
+      McpToolkit.config.logger = logger
+      exploding = Class.new(described_class) { def call(**) = raise("kaboom: SELECT * FROM secrets") }
+
+      expect { exploding.call(context:) }.to raise_error(McpToolkit::Protocol::InternalError)
+      expect(logger).to have_received(:error).with(/kaboom: SELECT \* FROM secrets/)
     end
 
     it "lets a deliberately-raised protocol error pass through with its own code" do
