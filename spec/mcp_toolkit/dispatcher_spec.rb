@@ -190,4 +190,26 @@ RSpec.describe McpToolkit::Dispatcher do
       expect(response[:error][:message]).to include("Method not found: frobnicate")
     end
   end
+
+  describe "an unexpected internal error" do
+    let(:boom_tool) { FakeTool.new { |_ctx, _args| raise "sensitive: SELECT * FROM secrets WHERE token = 'abc'" } }
+    let(:provider) { FakeToolProvider.new(tools: { "boom" => boom_tool }) }
+
+    it "returns a generic message to the caller, never the raw exception text" do
+      response = dispatcher.handle_request(request("tools/call", { "name" => "boom", "arguments" => {} }))
+
+      expect(response[:error][:code]).to eq(McpToolkit::Protocol::ErrorCodes::INTERNAL_ERROR)
+      expect(response[:error][:message]).to eq("Internal error")
+      expect(response[:error][:message]).not_to include("secrets")
+    end
+
+    it "logs the real error detail server-side" do
+      logger = instance_double(Logger, error: nil)
+      McpToolkit.config.logger = logger
+
+      dispatcher.handle_request(request("tools/call", { "name" => "boom", "arguments" => {} }))
+
+      expect(logger).to have_received(:error).with(/sensitive: SELECT \* FROM secrets/)
+    end
+  end
 end

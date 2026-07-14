@@ -444,4 +444,30 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
       expect(failed[:error][:code]).to eq(McpToolkit::Protocol::ErrorCodes::INVALID_PARAMS)
     end
   end
+
+  describe "batch size limit (mcp_enforce_batch_limit!)" do
+    before { authenticate_as(principal) }
+
+    it "rejects a batch larger than config.max_batch_size before running any element" do
+      McpToolkit.config.max_batch_size = 2
+      controller.request_body = body_for(rpc("ping", id: 1), rpc("ping", id: 2), rpc("ping", id: 3))
+
+      expect { controller.create }
+        .to raise_error(McpToolkit::Protocol::InvalidRequest, /batch too large: 3 requests/)
+    end
+
+    it "allows a batch within the limit" do
+      McpToolkit.config.max_batch_size = 2
+      controller.request_body = body_for(rpc("ping", id: 1), rpc("ping", id: 2))
+
+      expect { controller.create }.not_to raise_error
+    end
+
+    it "does not cap when max_batch_size is nil" do
+      McpToolkit.config.max_batch_size = nil
+      controller.request_body = body_for(*Array.new(5) { |i| rpc("ping", id: i) })
+
+      expect { controller.create }.not_to raise_error
+    end
+  end
 end

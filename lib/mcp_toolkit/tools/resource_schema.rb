@@ -39,7 +39,8 @@ class McpToolkit::Tools::ResourceSchema < McpToolkit::Tools::Base
     # Resolve the resource FIRST so its effective required scope gates discovery
     # of THIS resource's shape (and an unknown resource is a clean tool error).
     descriptor = resolve_descriptor(resource, config)
-    with_authentication(server_context, required_scope: config.registry.required_scope_for(descriptor)) do
+    with_authentication(server_context, required_scope: config.registry.required_scope_for(descriptor),
+                                        resource: descriptor) do
       McpToolkit::ResourceSchema.call(descriptor, registry: config.registry)
     end
   rescue McpToolkit::Errors::InvalidParams => e

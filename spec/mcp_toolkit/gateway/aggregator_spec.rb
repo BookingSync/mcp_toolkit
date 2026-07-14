@@ -188,6 +188,35 @@ RSpec.describe McpToolkit::Gateway::Aggregator do
       end
     end
 
+    context "when an upstream returns a malformed tool entry" do
+      it "skips a non-Hash entry and keeps the valid ones (does not error the whole list)" do
+        allow(client).to receive(:tools_list).and_return([
+          { "name" => "send_email", "description" => "Send", "inputSchema" => { "type" => "object" } },
+          "not-a-tool"
+        ])
+
+        expect(aggregator.tool_definitions.map { |d| d["name"] }).to eq(["notifications__send_email"])
+      end
+
+      it "skips a Hash entry without a name" do
+        allow(client).to receive(:tools_list).and_return([{ "description" => "nameless" }])
+
+        expect(aggregator.tool_definitions).to eq([])
+      end
+
+      it "keeps sibling upstreams when one upstream's entry is malformed" do
+        McpToolkit.config.register_upstream(key: "billing", url: "https://billing.test/mcp")
+        allow(McpToolkit::Gateway::Client).to receive(:new) do |upstream:, **|
+          instance_double(McpToolkit::Gateway::Client).tap do |c|
+            list = upstream.key == "notifications" ? ["bogus"] : [{ "name" => "charge", "description" => "d", "inputSchema" => {} }]
+            allow(c).to receive(:tools_list).and_return(list)
+          end
+        end
+
+        expect(aggregator.tool_definitions.map { |d| d["name"] }).to eq(["billing__charge"])
+      end
+    end
+
     context "across multiple upstreams" do
       it "aggregates all upstreams' tools in registry order" do
         McpToolkit.config.register_upstream(key: "billing", url: "https://billing.test/mcp")

@@ -163,6 +163,10 @@ class McpToolkit::ListExecutor
     return relation if params[:ids].blank?
 
     ids = params[:ids].to_s.split(",").map(&:strip).compact_blank
+    # Bound the IN-set the same way the per-attribute filters are bounded — the
+    # top-level `ids` param builds `WHERE id IN (...)` on its own path, so it
+    # must honor config.max_filter_values too (else it's an unbounded IN clause).
+    McpToolkit::Filtering.enforce_filter_limit!(ids.length, McpToolkit.config)
     ids.empty? ? relation : relation.where(id: ids)
   end
 

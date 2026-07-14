@@ -42,9 +42,13 @@ class McpToolkit::Dispatcher
     config.logger&.error("MCP dispatcher error: #{e.message}\n#{e.backtrace&.join("\n")}")
     return nil unless request.key?("id")
 
+    # A generic message to the caller: the raw exception text of an UNEXPECTED
+    # error (ActiveRecord::StatementInvalid carrying SQL, a NoMethodError naming
+    # internal classes, an internal hostname) must not leak. Full detail is in
+    # the log line above.
     McpToolkit::Protocol.error_response(
       id: request["id"],
-      error: McpToolkit::Protocol::InternalError.new(e.message)
+      error: McpToolkit::Protocol::InternalError.new("Internal error")
     )
   end
 

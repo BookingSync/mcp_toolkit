@@ -266,4 +266,73 @@ RSpec.describe "Server end-to-end (tools/call)" do
       )
     end
   end
+
+  describe "a superuser-only resource on the satellite path" do
+    # Registered alongside the default `widgets`; the default before-stub is a
+    # NON-superuser (kind: accounts_user) token carrying the required scope.
+    before do
+      serializer = widget_serializer
+      model = widget_model
+      relation = FakeRelation.new(rows, table_name: "secrets")
+      McpToolkit.registry.register(:secrets) do
+        model model
+        serializer serializer
+        description "Secrets."
+        superusers_only!
+        scope { |_root| relation }
+      end
+    end
+
+    def call_named(name, arguments, bearer: "forwarded-token")
+      server = McpToolkit::Server.build(server_context: { bearer_token: bearer, header_account_id: nil })
+      request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name:, arguments: } }
+      JSON.parse(server.handle_json(JSON.generate(request)))
+    end
+
+    def stub_superuser
+      stub_request(:post, introspect_endpoint).to_return(
+        status: 200, headers: { "Content-Type" => "application/json" },
+        body: JSON.generate(
+          valid: true, kind: "user", account_id: 42, account_ids: [42], scopes: ["widgets_app__read"]
+        )
+      )
+    end
+
+    it "refuses `list` for a non-superuser token" do
+      response = call_tool({ "resource" => "secrets" })
+
+      expect(response.dig("result", "isError")).to be(true)
+      expect(response.dig("result", "content", 0, "text")).to include("restricted to superuser")
+    end
+
+    it "allows `list` for a superuser token" do
+      stub_superuser
+
+      response = call_tool({ "resource" => "secrets", "account_id" => 42 })
+
+      expect(response.dig("result", "isError")).to be_falsey
+    end
+
+    it "refuses `resource_schema` for a non-superuser token" do
+      response = call_named("resource_schema", { "resource" => "secrets" })
+
+      expect(response.dig("result", "isError")).to be(true)
+      expect(response.dig("result", "content", 0, "text")).to include("restricted to superuser")
+    end
+
+    it "hides the resource from `resources` discovery for a non-superuser token" do
+      names = JSON.parse(call_named("resources", {}).dig("result", "content", 0, "text"))["resources"].map { |r| r["name"] }
+
+      expect(names).to include("widgets")
+      expect(names).not_to include("secrets")
+    end
+
+    it "shows the resource in `resources` discovery for a superuser token" do
+      stub_superuser
+
+      names = JSON.parse(call_named("resources", {}).dig("result", "content", 0, "text"))["resources"].map { |r| r["name"] }
+
+      expect(names).to include("secrets")
+    end
+  end
 end

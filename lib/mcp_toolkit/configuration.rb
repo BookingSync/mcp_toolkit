@@ -249,6 +249,14 @@ class McpToolkit::Configuration
   # @return [Integer, nil]
   attr_accessor :max_filter_values
 
+  # Caps how many JSON-RPC calls a single POST batch may carry on the authority
+  # transport. Rate limiting is per-HTTP-request, so an uncapped batch would let
+  # one request fan out unbounded work (N tool executions / N upstream calls)
+  # under a single rate-limit tick. nil disables the cap.
+  #
+  # @return [Integer, nil]
+  attr_accessor :max_batch_size
+
   # --- protocol / transport --------------------------------------------------
 
   # @return [String, nil] protocol version to pin on the underlying MCP::Server.
@@ -457,6 +465,7 @@ class McpToolkit::Configuration
     @non_numeric_pk_order = :created_at
     @filter_operator_overrides = {}
     @max_filter_values = 500
+    @max_batch_size = 50
   end
 
   # The default authority tool catalog when no explicit `tool_provider` is

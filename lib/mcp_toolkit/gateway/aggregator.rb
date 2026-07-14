@@ -96,11 +96,17 @@ class McpToolkit::Gateway::Aggregator
     # Degrade gracefully: omit this upstream's tools, don't cache the failure.
     config.logger&.error("MCP upstream #{upstream.key} tools/list failed, omitting: #{e.message}")
     []
+  rescue StandardError => e
+    # Backstop: any OTHER error while processing ONE upstream (e.g. a malformed
+    # tool definition) must degrade just that upstream, never 500 the whole
+    # aggregated tools/list and take every sibling upstream down with it.
+    config.logger&.error("MCP upstream #{upstream.key} tools/list errored, omitting: #{e.class}: #{e.message}")
+    []
   end
 
   def live_definitions(upstream, bearer_token:)
     client = McpToolkit::Gateway::Client.new(upstream:, bearer_token:, config:)
-    client.tools_list.map do |definition|
+    client.tools_list.filter_map do |definition|
       namespaced(upstream, definition)
     end
   end
@@ -112,6 +118,14 @@ class McpToolkit::Gateway::Aggregator
   # fresh structure, so the upstream's (possibly cached) definition is never
   # mutated.
   def namespaced(upstream, definition)
+    # A hostile/broken upstream can return a non-Hash entry (or a Hash with no
+    # "name"); skip it (logging the shape, never its content) so one bad entry
+    # degrades to omission instead of raising through the whole aggregate.
+    unless definition.is_a?(Hash) && definition["name"]
+      config.logger&.warn("MCP upstream #{upstream.key}: skipping a malformed tool entry (#{definition.class})")
+      return nil
+    end
+
     rewritten = McpToolkit::ToolReferenceRewriter.rewrite(definition, upstream.name_for(""))
     rewritten = rewritten.dup if rewritten.equal?(definition)
     rewritten["name"] = upstream.name_for(definition["name"])

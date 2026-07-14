@@ -25,6 +25,31 @@ filter-path hardening from a security review.
   correctly-escaping connection and asserts hostile payloads stay inside escaped
   string literals (the prior fake connection did not escape quotes, so it could
   not have caught an escaping regression).
+- New `config.max_batch_size` (default `50`, `nil` disables) caps the number of
+  JSON-RPC calls a single authority POST batch may carry. Rate limiting is a
+  per-HTTP-request `before_action`, so an uncapped batch let one request fan out
+  unbounded work (N tool executions / N blocking upstream calls) under a single
+  rate-limit tick; an over-size batch is now rejected as a JSON-RPC error before
+  any element runs.
+- The top-level `list` `ids` filter now honors `config.max_filter_values` — it
+  built `WHERE id IN (...)` on its own path, bypassing the cap that already
+  bounds the per-attribute filters.
+- The authority dispatcher no longer relays an unexpected exception's message to
+  the caller: an unhandled `StandardError` returns a generic "Internal error"
+  (full detail still logged), so `ActiveRecord::StatementInvalid` SQL, internal
+  class names, or an internal hostname can't leak in the JSON-RPC error.
+- The gateway `tools/list` aggregator now degrades a single malformed upstream
+  tool entry (a non-Hash / name-less definition) by skipping it, and wraps each
+  upstream's processing so any unexpected error omits only that upstream instead
+  of 500-ing the whole aggregated list for every upstream.
+- Usage metering flush falls back to per-event writes when the batch write
+  fails, so one un-persistable ("poison") event can no longer drop metering for
+  a whole request's batch (a billing-evasion vector).
+- The satellite tool path (`get` / `list` / `resource_schema` / `resources`) now
+  enforces `Resource#superusers_only!` — previously only the authority path did,
+  so a superuser-only resource served via a satellite was readable/discoverable
+  by any valid token (still account-scoped, so not cross-tenant). `get`/`list`/
+  `resource_schema` refuse it for a non-superuser; `resources` hides it.
 
 ### Added
 

@@ -92,6 +92,20 @@ RSpec.describe "Registry + executors + serializer (data path)" do
       expect(result[:widgets].map { |w| w[:id] }).to eq([1, 3])
     end
 
+    it "caps the top-level `ids` filter at config.max_filter_values" do
+      McpToolkit.config.max_filter_values = 3
+
+      expect { described_class.call(resource:, scope_root: account, params: { ids: "1,2,3,4" }) }
+        .to raise_error(McpToolkit::Errors::InvalidParams, /at most 3 values/)
+    end
+
+    it "allows an `ids` list within config.max_filter_values" do
+      McpToolkit.config.max_filter_values = 3
+
+      expect { described_class.call(resource:, scope_root: account, params: { ids: "1,2,3" }) }
+        .not_to raise_error
+    end
+
     it "treats a comma-separated equality value as an IN set (API v3 parity)" do
       result = described_class.call(resource:, scope_root: account, params: { filter: { booking_id: "10,20" } })
 

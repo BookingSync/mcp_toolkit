@@ -17,16 +17,19 @@ class McpToolkit::Tools::Resources < McpToolkit::Tools::Base
     config = config_from(server_context)
     # Discovery requires the registry-level default scope (the satellite's
     # app-wide scope); per-resource scopes are enforced by `get` / `list`.
-    with_authentication(server_context, required_scope: config.registry.default_required_permissions_scope) do
+    with_authentication(server_context,
+                        required_scope: config.registry.default_required_permissions_scope) do |introspection|
       {
-        resources: config.registry.resources.map do |resource|
-          {
-            name: resource.name,
-            description: resource.description,
-            filterable: filterable?(resource, config),
-            note: resource.note
-          }.compact
-        end
+        resources: config.registry.resources
+                         .reject { |resource| resource.superusers_only? && !introspection.superuser? }
+                         .map do |resource|
+                           {
+                             name: resource.name,
+                             description: resource.description,
+                             filterable: filterable?(resource, config),
+                             note: resource.note
+                           }.compact
+                         end
       }
     end
   end
