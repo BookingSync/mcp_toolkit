@@ -126,41 +126,6 @@ class McpToolkit::Configuration
   # @return [Integer] session sliding-TTL in seconds.
   attr_accessor :session_ttl
 
-  # Cache-key namespace for stored sessions. Overridable so a host migrating an
-  # EXISTING session store into the gem can keep its historical namespace —
-  # old and new application versions then share live sessions during a rolling
-  # deploy instead of 404-ing each other's session ids.
-  #
-  # @return [String]
-  attr_accessor :session_key_prefix
-
-  # Optional codec pair for the STORED session payload, for hosts whose
-  # pre-gem sessions used a different wire format. `session_payload_dumper`
-  # receives the session's `data` hash and returns the hash to store;
-  # `session_payload_loader` receives a stored hash and returns the `data`
-  # hash. Both nil (the default) = the gem's native `{ created_at:, data: }`
-  # format. Set BOTH together so every instance reads what any instance wrote.
-  # For the common case — a flat legacy hash whose keys are simply named
-  # differently — prefer the declarative `session_payload_key_map` instead.
-  #
-  # @return [Proc, nil]
-  attr_accessor :session_payload_dumper, :session_payload_loader
-
-  # Declarative session codec for the common legacy format: a FLAT stored hash
-  # (no `{ created_at:, data: }` envelope) whose keys are renamed from the
-  # session's `data` keys. Maps data-key => stored-key; unmapped keys pass
-  # through unchanged in both directions, and stored keys are symbolized on
-  # read (so a string-keyed cache coder still round-trips):
-  #
-  #   config.session_payload_key_map = { token_id: :legacy_token_id }
-  #   # data { token_id: 5 } is stored as { legacy_token_id: 5 } and read back
-  #
-  # Empty (the default) = the gem's native format. An explicit
-  # `session_payload_dumper` / `session_payload_loader` takes precedence.
-  #
-  # @return [Hash{Symbol => Symbol}]
-  attr_accessor :session_payload_key_map
-
   # --- rate limiting ---------------------------------------------------------
 
   # The built-in per-principal request cap enforced by the authority transport
@@ -445,15 +410,11 @@ class McpToolkit::Configuration
     @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
   end
 
-  # Session-store and list-executor defaults: the gem's native session format /
-  # namespace, and the :tokenized / :created_at data-path semantics (a host
-  # preserving a pre-gem contract overrides these — see each accessor's docs).
+  # Session-TTL and list-executor defaults: the :tokenized / :created_at
+  # data-path semantics (a host preserving a pre-gem contract overrides these —
+  # see each accessor's docs).
   def initialize_data_path_defaults
     @session_ttl = 3600 # 1 hour
-    @session_key_prefix = "mcp_toolkit:session:"
-    @session_payload_dumper = nil
-    @session_payload_loader = nil
-    @session_payload_key_map = {}
 
     @sql_sanitizer = McpToolkit::SqlSanitizer.new
     @bare_filter_value_semantics = :tokenized

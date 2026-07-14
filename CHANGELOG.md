@@ -1,11 +1,20 @@
-## [0.4.1] - 2026-07-13
+## [0.5.0] - 2026-07-14
 
-Backward-compatibility and discoverability fixes for the authority-path generic
-tools, driven by an adopting host's parity review against the API contract the
-gem replaced.
+Authority-path discoverability + backward-compatibility work (driven by an
+adopting host's parity review against the API contract the gem replaced), plus a
+role-aware mountable engine so an authority mounts its transport in one line.
 
 ### Added
 
+- The mountable `McpToolkit::Engine` is now ROLE-AWARE: the
+  `McpToolkit::ServerController` it mounts at POST/GET/DELETE /mcp is built from
+  `config.auth_role` — an authority host gets the hand-rolled dispatcher path
+  (local token auth, gateway proxying, usage metering, rate limiting), a
+  satellite gets the SDK-backed path. So an authority now mounts its whole
+  transport with `mount McpToolkit::Engine => "/mcp"` (identical to a satellite)
+  instead of hand-drawing the four routes against a subclass of
+  `McpToolkit::Authority::ServerController` — which is still supported for a host
+  that prefers to draw its own routes.
 - `resource_schema` surfaces a resource's custom filters (`Resource#filter`)
   under `resource_filters` — name, type and description — so a client can
   discover them. The `Resource#filter` docs always promised this; nothing
@@ -35,11 +44,6 @@ and their descriptions document the same filter grammar.
 For a host migrating an EXISTING MCP endpoint onto the gem, whose clients hold
 the pre-gem contract:
 
-- `config.session_key_prefix` + `config.session_payload_dumper` /
-  `session_payload_loader` — keep the pre-gem session cache namespace and wire
-  format, so old and new application versions SHARE live sessions during a
-  rolling deploy (no forced client re-initialization). The sliding-TTL bump
-  re-writes the raw stored payload untouched.
 - `config.bare_filter_value_semantics = :literal` — bare filter values reach
   the WHERE clause verbatim (`"a,b"` is one literal string, `"null"` is the
   literal string, `""` matches empty-string rows, an Array — including nil
@@ -68,12 +72,6 @@ the pre-gem contract:
   "cannot be filtered with operators", and `date` columns accept `in` again.
 - The `list` tools' input schemas declare `additionalProperties: true`
   explicitly (resource-specific filters arrive as top-level arguments).
-- `config.session_payload_key_map` — declarative codec for the common legacy
-  session format (a flat stored hash with renamed keys): maps data-key =>
-  stored-key, unmapped keys pass through, stored keys are symbolized on read
-  (string-keyed cache coders round-trip). Replaces hand-written
-  dumper/loader lambdas for the single-key-rename case; an explicit
-  dumper/loader pair still takes precedence.
 - `config.register_upstreams_from_env(mapping, env: ENV)` — declares gateway
   upstreams from a `{ key => env var }` map: resets the registry first
   (idempotent across code reloads) and skips blank urls, the two gotchas every

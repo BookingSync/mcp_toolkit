@@ -19,17 +19,21 @@ RSpec.describe "Mountable engine + gem controller" do
   describe "McpToolkit::ServerController (engine controller)" do
     # A fake ActionController::Base: provides only the class-level hooks the
     # transport concerns' `included do` blocks invoke.
+    let(:auth_role) { :satellite }
+
     before do
       stub_const("FakeActionControllerBase", Class.new do
         def self.before_action(*); end
         def self.after_action(*); end
-        # The concern guards protect_from_forgery behind respond_to?; omit it so
-        # that branch is exercised (no CSRF machinery needed in a unit test).
+        # The concerns guard protect_from_forgery / rescue_from behind respond_to?;
+        # omit them so those branches are exercised (no CSRF/rescue machinery
+        # needed in a unit test).
       end)
       McpToolkit.config.parent_controller = "FakeActionControllerBase"
+      McpToolkit.config.auth_role = auth_role
 
       # The engine controllers are no longer files: they are built lazily from the
-      # configured parent by the builder (Constraint B). Build them explicitly.
+      # configured parent + role by the builder (Constraint B). Build them explicitly.
       McpToolkit.build_engine_controllers!
     end
 
@@ -39,12 +43,24 @@ RSpec.describe "Mountable engine + gem controller" do
       expect(McpToolkit::ServerController.superclass).to eq(FakeActionControllerBase)
     end
 
-    it "includes the standalone transport concern (the engine path is additive)" do
-      expect(McpToolkit::ServerController.include?(McpToolkit::Transport::ControllerMethods)).to be(true)
-    end
-
     it "exposes the transport actions wired by the concern" do
       expect(McpToolkit::ServerController.instance_methods).to include(:create, :stream, :destroy, :health)
+    end
+
+    context "when the host is a satellite (the default role)" do
+      it "mounts the SDK-backed transport concern" do
+        expect(McpToolkit::ServerController.include?(McpToolkit::Transport::ControllerMethods)).to be(true)
+        expect(McpToolkit::ServerController.include?(McpToolkit::Authority::ControllerMethods)).to be(false)
+      end
+    end
+
+    context "when the host is an authority" do
+      let(:auth_role) { :authority }
+
+      it "mounts the hand-rolled authority transport concern (so `mount` works for an authority)" do
+        expect(McpToolkit::ServerController.include?(McpToolkit::Authority::ControllerMethods)).to be(true)
+        expect(McpToolkit::ServerController.include?(McpToolkit::Transport::ControllerMethods)).to be(false)
+      end
     end
   end
 

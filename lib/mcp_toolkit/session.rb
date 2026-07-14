@@ -14,71 +14,36 @@
 # NOT interpret `data` (it never re-resolves a token; that's the consumer's auth
 # concern): it stores it, round-trips it, and exposes it via `#data`.
 class McpToolkit::Session
+  CACHE_KEY_PREFIX = "mcp_toolkit:session:"
+
   def self.create!(data: {}, config: McpToolkit.config)
     id = SecureRandom.uuid
-    config.cache_store.write(cache_key(id, config), dump(data, config), expires_in: config.session_ttl)
+    config.cache_store.write(cache_key(id), { created_at: Time.now.to_i, data: }, expires_in: config.session_ttl)
     new(id:, data:)
   end
 
   def self.find(id, config: McpToolkit.config)
     return nil if id.to_s.empty?
 
-    stored = config.cache_store.read(cache_key(id, config))
+    stored = config.cache_store.read(cache_key(id))
     return nil unless stored
 
-    # Sliding expiry: bump TTL on every successful lookup. The RAW stored hash
-    # is re-written untouched, so under a custom payload codec every
-    # application version keeps reading a format it understands.
-    config.cache_store.write(cache_key(id, config), stored, expires_in: config.session_ttl)
-    new(id:, data: load_data(stored, config))
+    # Sliding expiry: bump TTL on every successful lookup, re-writing the row
+    # untouched.
+    config.cache_store.write(cache_key(id), stored, expires_in: config.session_ttl)
+    new(id:, data: stored[:data] || {})
   end
 
   def self.delete(id, config: McpToolkit.config)
     return false if id.to_s.empty?
 
-    config.cache_store.delete(cache_key(id, config))
+    config.cache_store.delete(cache_key(id))
   end
 
-  # The key namespace comes from config so a host can keep a pre-gem namespace
-  # (see Configuration#session_key_prefix) and share live sessions across old
-  # and new application versions during a rolling deploy.
-  def self.cache_key(id, config)
-    "#{config.session_key_prefix}#{id}"
+  def self.cache_key(id)
+    "#{CACHE_KEY_PREFIX}#{id}"
   end
   private_class_method :cache_key
-
-  # The stored payload defaults to the gem's `{ created_at:, data: }` format; a
-  # host migrating a pre-gem session store injects a dumper/loader pair — or,
-  # for the common flat-hash-with-renamed-keys legacy format, the declarative
-  # `session_payload_key_map` (see Configuration docs; an explicit dumper/loader
-  # pair takes precedence over the map).
-  def self.dump(data, config)
-    return config.session_payload_dumper.call(data) if config.session_payload_dumper
-
-    map = config.session_payload_key_map
-    return data.transform_keys { |key| map.fetch(key, key) } if map.any?
-
-    { created_at: Time.now.to_i, data: }
-  end
-  private_class_method :dump
-
-  def self.load_data(stored, config)
-    return config.session_payload_loader.call(stored) || {} if config.session_payload_loader
-
-    map = config.session_payload_key_map
-    if map.any?
-      return {} unless stored.is_a?(Hash)
-
-      # Symbolize first so a string-keyed cache coder still round-trips, then
-      # rename stored keys back to data keys (unmapped keys pass through).
-      inverse = map.invert
-      return stored.symbolize_keys.transform_keys { |key| inverse.fetch(key, key) }
-    end
-
-    # `data` defaults to {} for legacy rows written before the payload existed.
-    stored[:data] || {}
-  end
-  private_class_method :load_data
 
   attr_reader :id, :data
 
