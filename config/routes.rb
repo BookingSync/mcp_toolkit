@@ -30,4 +30,21 @@ McpToolkit::Engine.routes.draw do
   # is true whenever `auth_role == :authority`). The controller also fails safe
   # (no `token_authenticator` => `{ valid: false }`), so this is defence in depth.
   post "tokens/introspect", to: "tokens#introspect" if McpToolkit.config.authority?
+
+  # The OAuth authorization bridge (McpToolkit::Oauth::ControllerMethods). Drawn
+  # only when the bridge is configured — `oauth_bridge?` is authority-only AND
+  # requires a redirect-uri allowlist — so a satellite, or any host that has not
+  # opted in, gets no such routes at all. Same reasoning as the introspection
+  # route above: the routes file is evaluated through the routes_reloader, after
+  # the host's initializers/to_prepare, so the config is already set.
+  #
+  # The two metadata documents are NOT here: a client looks for them at the origin
+  # root, which an engine mounted under a path cannot draw. The host draws them
+  # with `McpToolkit.draw_oauth_metadata_routes(self)`.
+  if McpToolkit.config.oauth_bridge?
+    get "oauth/authorize", to: "oauth#authorize"
+    post "oauth/authorize", to: "oauth#approve"
+    post "oauth/token", to: "oauth#token"
+    post "oauth/register", to: "oauth#register"
+  end
 end

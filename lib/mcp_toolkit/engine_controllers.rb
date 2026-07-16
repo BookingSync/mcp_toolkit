@@ -28,7 +28,7 @@ module McpToolkit
   # The controllers built directly under McpToolkit (the engine's routes point at
   # these). McpToolkit::Authority::ServerController is built alongside them but is
   # fetched through McpToolkit::Authority's own const_missing.
-  ENGINE_CONTROLLER_NAMES = %i[ServerController TokensController].freeze
+  ENGINE_CONTROLLER_NAMES = %i[ServerController TokensController OauthController].freeze
 
   # (Re)builds the engine controllers + the authority base from the current
   # config. Idempotent: an existing constant is replaced so a rebuild reflects a
@@ -37,6 +37,7 @@ module McpToolkit
     parent = config.parent_controller.constantize
     define_controller(self, :ServerController, build_server_controller(parent))
     define_controller(self, :TokensController, build_tokens_controller(parent))
+    define_controller(self, :OauthController, build_oauth_controller(parent))
     define_controller(Authority, :ServerController, build_authority_server_controller(parent))
     ServerController
   end
@@ -44,7 +45,7 @@ module McpToolkit
   # Undefines the built controllers so the next reference rebuilds them from the
   # then-current config. Called from the engine's `to_prepare` on every reload.
   def self.reset_engine_controllers!
-    [[self, :ServerController], [self, :TokensController], [Authority, :ServerController]].each do |mod, name|
+    ENGINE_CONTROLLER_NAMES.map { |name| [self, name] }.push([Authority, :ServerController]).each do |mod, name|
       mod.send(:remove_const, name) if mod.const_defined?(name, false)
     end
   end
@@ -96,10 +97,45 @@ module McpToolkit
     end
   end
 
+  # The OAuth authorization bridge the engine mounts at `<mcp>/oauth/*` and the
+  # host draws at the two `.well-known` metadata paths. Built like its siblings so
+  # it picks up `config.parent_controller` — which, for this one, must descend from
+  # ActionController::Base, since the authorization page is an HTML view.
+  def self.build_oauth_controller(parent)
+    Class.new(parent) { include McpToolkit::Oauth::ControllerMethods }
+  end
+
   # The AUTHORITY base controller a host subclasses (the recommended path for a
   # host whose rate-limit/usage/account hooks touch app models).
   def self.build_authority_server_controller(parent)
     Class.new(parent) { include McpToolkit::Authority::ControllerMethods }
+  end
+
+  # Draws the OAuth bridge's two metadata documents at the ORIGIN ROOT, where a
+  # client looks for them and where an engine mounted under a path cannot reach.
+  # The host calls this at the TOP LEVEL of its own route set — not inside a
+  # locale/format/constraint scope, which would prefix the paths out of view:
+  #
+  #   # config/routes.rb
+  #   Rails.application.routes.draw do
+  #     McpToolkit.draw_oauth_metadata_routes(self)
+  #     mount McpToolkit::Engine => "/mcp"
+  #     # ...
+  #   end
+  #
+  # A no-op unless the bridge is configured, so the call can sit in a host's
+  # routes unconditionally across environments. The path-suffixed
+  # protected-resource route covers clients that probe
+  # `/.well-known/oauth-protected-resource/<mcp-path>` before the bare path.
+  def self.draw_oauth_metadata_routes(mapper)
+    return unless config.oauth_bridge?
+
+    mapper.get McpToolkit::Oauth::ControllerMethods::PROTECTED_RESOURCE_PATH,
+               to: "mcp_toolkit/oauth#protected_resource", format: false
+    mapper.get "#{McpToolkit::Oauth::ControllerMethods::PROTECTED_RESOURCE_PATH}/*mcp_path",
+               to: "mcp_toolkit/oauth#protected_resource", format: false
+    mapper.get McpToolkit::Oauth::ControllerMethods::AUTHORIZATION_SERVER_PATH,
+               to: "mcp_toolkit/oauth#authorization_server", format: false
   end
 
   # Removes an existing same-named constant (avoiding a redefinition warning on a

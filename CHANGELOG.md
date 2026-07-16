@@ -1,3 +1,60 @@
+## [0.6.0] - 2026-07-16
+
+An OAuth 2.1 authorization bridge for the authority role, so hosted MCP clients
+that will only authenticate by discovering an authorization server and running a
+browser flow can reach a server whose tokens are issued out-of-band. Additive and
+opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
+
+### Added
+
+- **OAuth authorization bridge (authority-only, opt-in).** A standards-shaped
+  envelope around the tokens a host ALREADY issues — not an identity provider. Its
+  authorization page asks an operator to paste an existing access token, and the
+  `access_token` it returns IS that token, verified through the same
+  `config.token_authenticator` the transport uses. Scopes, expiry, revocation and
+  tenancy stay entirely with the host; the bridge widens nobody's reach.
+
+  Deliberately not implemented, because none of it gates anything here: client
+  registration returns an identifier and stores nothing (no endpoint reads a
+  `client_id`); there is no consent step (pasting a token you already hold is the
+  grant); no refresh token is issued (the pasted token's own expiry is the real
+  lifetime, so a client re-runs the flow rather than refreshing a shadow of it).
+
+  Deliberately NOT mocked, because faking either would create a real vulnerability
+  rather than skip a ceremony: `redirect_uri` is matched against
+  `config.oauth_allowed_redirect_uris` by exact string on BOTH legs (an unvetted
+  redirect target would be an open redirect that emits authorization codes), and
+  the PKCE `code_verifier` is verified (constant-time) against the stored S256
+  `code_challenge`.
+
+  Endpoints — `GET`/`POST` `<mcp>/oauth/authorize`, `POST <mcp>/oauth/token`,
+  `POST <mcp>/oauth/register`, plus the two metadata documents
+  (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`).
+  The metadata must answer at the ORIGIN ROOT, which an engine mounted under a path
+  cannot draw, so a host adds one line at the top level of its route set:
+  `McpToolkit.draw_oauth_metadata_routes(self)` (a no-op unless the bridge is
+  configured). Every identifier is derived from the live request origin, so each
+  host name an app answers on works without further configuration.
+- `config.oauth_allowed_redirect_uris` (default `[]`), `config.oauth_resource_path`
+  (default `"/mcp"` — must match the engine's mount point), and
+  `config.oauth_authorization_code_ttl` (default `60`).
+- `config.oauth_bridge?` — whether the bridge is live. Gated on the authority role
+  AND a non-empty redirect allowlist, so it cannot run without bounds on where codes
+  may go, and a satellite (whose tokens belong to its central app) never draws it.
+- The authority transport's 401 now carries
+  `WWW-Authenticate: Bearer resource_metadata="..."` when the bridge is configured —
+  the header a hosted client waits for before it will start a flow at all. Absent
+  otherwise, so an opted-out host's 401 is unchanged.
+
+### Notes
+
+- The bridge renders an HTML page, so a host enabling it must point
+  `config.parent_controller` at an `ActionController::Base` descendant
+  (`ActionController::API` cannot render one). The transport itself is unaffected.
+- A host restyles the page by defining its own
+  `app/views/mcp_toolkit/oauth/authorize.html.erb`, which takes precedence over the
+  engine's.
+
 ## [0.5.0] - 2026-07-14
 
 Authority-path discoverability + backward-compatibility work (driven by an

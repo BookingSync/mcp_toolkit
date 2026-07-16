@@ -381,6 +381,7 @@ module McpToolkit::Authority::ControllerMethods
   # ---- error renders --------------------------------------------------
 
   def mcp_render_unauthorized(message)
+    mcp_set_authenticate_challenge
     render json: {
       jsonrpc: McpToolkit::Protocol::JSONRPC_VERSION,
       id: nil,
@@ -389,6 +390,18 @@ module McpToolkit::Authority::ControllerMethods
         message: "Unauthorized: #{message}"
       }
     }, status: :unauthorized
+  end
+
+  # Points an unauthenticated caller at the OAuth bridge's protected-resource
+  # metadata (RFC 9728). This header is what a hosted MCP client waits for before
+  # it will start an authorization flow at all — without it, a 401 is just a
+  # failure. Emitted only when the bridge is configured, so a host that has not
+  # opted in keeps its 401 byte-identical.
+  def mcp_set_authenticate_challenge
+    return unless mcp_config.oauth_bridge?
+
+    metadata_url = "#{request.base_url}#{McpToolkit::Oauth::ControllerMethods::PROTECTED_RESOURCE_PATH}"
+    response.headers["WWW-Authenticate"] = %(Bearer resource_metadata="#{metadata_url}")
   end
 
   def mcp_render_session_not_found

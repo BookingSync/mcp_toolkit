@@ -91,9 +91,13 @@ RSpec.describe "Mountable engine + gem controller" do
     # Default to :authority so the full endpoint set is asserted; the satellite
     # context below covers the gated-off case.
     let(:auth_role) { :authority }
+    # The OAuth bridge is off until a host names who may receive an authorization
+    # code, so it stays out of the default endpoint set.
+    let(:oauth_redirect_uris) { [] }
 
     before do
       McpToolkit.config.auth_role = auth_role
+      McpToolkit.config.oauth_allowed_redirect_uris = oauth_redirect_uris
       recorder = route_recorder
       stub_const("Rails", Module.new)
       # The engine class body now also calls `config.to_prepare { ... }` (lazy
@@ -134,6 +138,37 @@ RSpec.describe "Mountable engine + gem controller" do
       let(:auth_role) { :satellite }
 
       it "draws the transport endpoints but NOT the authority introspection route" do
+        expect(route_recorder.drawn).to contain_exactly(*transport_routes)
+      end
+    end
+
+    oauth_routes = [
+      [:get, "oauth/authorize", "oauth#authorize"],
+      [:post, "oauth/authorize", "oauth#approve"],
+      [:post, "oauth/token", "oauth#token"],
+      [:post, "oauth/register", "oauth#register"]
+    ]
+
+    it "does NOT draw the OAuth bridge for an authority that has not opted in" do
+      expect(route_recorder.drawn).not_to include(*oauth_routes)
+    end
+
+    context "when the OAuth bridge is configured on an authority" do
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+
+      it "draws the bridge's endpoints" do
+        expect(route_recorder.drawn).to include(*oauth_routes)
+      end
+    end
+
+    # The flow hands back a token this app authenticates itself; a satellite's
+    # tokens belong to its central app, so there is nothing for it to authorize
+    # against — an allowlist alone must not switch the bridge on.
+    context "when a satellite configures a redirect allowlist" do
+      let(:auth_role) { :satellite }
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+
+      it "still draws no OAuth bridge" do
         expect(route_recorder.drawn).to contain_exactly(*transport_routes)
       end
     end

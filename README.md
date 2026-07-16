@@ -403,6 +403,76 @@ mount McpToolkit::Engine => "/mcp"   # POST /mcp/tokens/introspect now works
 Drawing it is safe even on an app that is not an authority: with no
 `token_authenticator`, it simply answers `{ "valid": false }`.
 
+### OAuth authorization bridge (authority-only, opt-in)
+
+Some MCP clients will not accept a token you hand them. They authenticate one way
+only: discover an authorization server, run an authorization-code + PKCE flow in a
+browser, and use whatever `access_token` comes back. The MCP authorization spec
+also forbids a token in the request URI, so `?token=<...>` is not a fallback for
+them either. If your tokens are issued out-of-band — an admin UI, a CLI, a support
+process — those clients cannot reach your server at all.
+
+The bridge is a standards-shaped **envelope around the tokens you already issue**.
+It is not an identity provider: its authorization page asks the operator to paste
+an access token they already hold, and the `access_token` it returns **is that
+token**, verified through the same `token_authenticator` your transport uses.
+Scopes, expiry, revocation and tenancy stay exactly where you put them, and it
+creates no new way to obtain a token.
+
+```ruby
+# config/initializers/mcp_toolkit.rb
+McpToolkit.configure do |c|
+  c.auth_role = :authority
+  c.token_authenticator = ->(plaintext) { AccessToken.authenticate(plaintext) }
+
+  # Naming who may receive an authorization code is what switches the bridge on.
+  c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
+  c.oauth_resource_path = "/mcp" # must match the engine's mount point
+end
+```
+
+```ruby
+# config/routes.rb — the helper call must be TOP LEVEL, since the two metadata
+# documents have to answer at the origin root (an engine mounted under a path
+# cannot draw them). It is a no-op unless the bridge is configured.
+Rails.application.routes.draw do
+  McpToolkit.draw_oauth_metadata_routes(self)
+  mount McpToolkit::Engine => "/mcp"
+end
+```
+
+That yields the whole flow — `GET /.well-known/oauth-protected-resource`,
+`GET /.well-known/oauth-authorization-server`, `POST /mcp/oauth/register`,
+`GET`/`POST /mcp/oauth/authorize`, `POST /mcp/oauth/token` — plus a
+`WWW-Authenticate: Bearer resource_metadata="..."` header on the transport's 401,
+which is what makes a client start the flow at all. Every identifier is derived
+from the live request origin, so each host name your app answers on works with no
+further configuration.
+
+**What is deliberately absent**, because none of it gates anything here: client
+registration returns an identifier and stores nothing (no endpoint reads a
+`client_id`); there is no consent step (pasting a token you hold *is* the grant);
+no refresh token is issued (the pasted token's own expiry is the real lifetime, so
+a client re-runs the flow instead of refreshing a shadow of it).
+
+**What is not faked**, because faking either would be a real vulnerability rather
+than a skipped ceremony: `redirect_uri` is matched against
+`oauth_allowed_redirect_uris` by exact string on both legs — an unvetted redirect
+target would be an open redirect that emits authorization codes — and the PKCE
+`code_verifier` is verified against the stored S256 challenge.
+
+Two constraints worth knowing before you enable it. The bridge renders an HTML
+page, so `config.parent_controller` must descend from `ActionController::Base`
+(`ActionController::API` cannot render one); the transport itself is unaffected.
+And `oauth_allowed_redirect_uris` is empty by default, which leaves
+`config.oauth_bridge?` false and the routes undrawn — the bridge cannot run
+without bounds on where codes may go, and a satellite never draws it at all
+(its tokens belong to its central app, so there is nothing for it to authorize
+against).
+
+To restyle the page, define your own `app/views/mcp_toolkit/oauth/authorize.html.erb`
+— your app's view path takes precedence over the engine's.
+
 ## Authority + gateway server (own tools + upstreams, no SDK)
 
 Beyond the SDK-backed satellite path, the toolkit also ships a **hand-rolled

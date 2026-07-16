@@ -112,6 +112,46 @@ class McpToolkit::Configuration
   # @return [#call, nil]
   attr_accessor :token_authenticator
 
+  # --- auth: OAuth authorization bridge (authority-only) ---------------------
+  #
+  # An OAuth 2.1 authorization-code + PKCE envelope around the tokens the host
+  # ALREADY issues, for hosted MCP clients that will only authenticate by
+  # discovering an authorization server and running a browser flow (and that
+  # cannot be handed a token in the request URI, which the MCP authorization spec
+  # forbids). It authenticates nobody: its authorization page asks the operator
+  # to paste an existing access token and hands that same token back. See
+  # McpToolkit::Oauth::ControllerMethods.
+
+  # The exact redirect URIs an authorization code may be handed to — the
+  # allowlist a client's `redirect_uri` is matched against by exact string. This
+  # is the bridge's load-bearing control: without it the authorize endpoint would
+  # be an open redirect that emits authorization codes.
+  #
+  # EMPTY BY DEFAULT, and an empty list DISABLES the bridge entirely (see
+  # `oauth_bridge?`) — so it cannot be switched on without naming who may receive
+  # a code, and a host that wants nothing to do with it sets nothing.
+  #
+  #   c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
+  #
+  # @return [Array<String>]
+  attr_accessor :oauth_allowed_redirect_uris
+
+  # The path McpToolkit::Engine is mounted at, used to build the `resource`
+  # identifier and the bridge's own endpoint URLs (their origin comes from the
+  # live request, so every host name the app answers on works). MUST match the
+  # actual mount point, and the `resource` it yields MUST equal the MCP endpoint
+  # URL as an operator types it into their client.
+  #
+  # @return [String]
+  attr_accessor :oauth_resource_path
+
+  # Seconds an issued authorization code stays redeemable. Codes are single-use
+  # (read-and-deleted at exchange); this only bounds a code that is never
+  # redeemed. Short by design — a client exchanges immediately.
+  #
+  # @return [Integer]
+  attr_accessor :oauth_authorization_code_ttl
+
   # --- caching ---------------------------------------------------------------
 
   # The cache store backing sessions and introspection results. Must satisfy the
@@ -434,6 +474,10 @@ class McpToolkit::Configuration
 
     @token_authenticator = nil
 
+    @oauth_allowed_redirect_uris = []
+    @oauth_resource_path = "/mcp"
+    @oauth_authorization_code_ttl = 60
+
     @cache_store = ActiveSupport::Cache::MemoryStore.new
     initialize_data_path_defaults
 
@@ -554,6 +598,21 @@ class McpToolkit::Configuration
   #   introspection.
   def authority?
     auth_role.to_sym == :authority
+  end
+
+  # Whether the OAuth authorization bridge is live: its routes are drawn, and the
+  # authority transport advertises it on a 401 via `WWW-Authenticate`.
+  #
+  # Gated on BOTH conditions, each for its own reason. It is AUTHORITY-ONLY
+  # because the flow hands back a token this app itself authenticates — a
+  # satellite's tokens belong to its central app, so there is nothing here for it
+  # to authorize against. And it requires a non-empty
+  # `oauth_allowed_redirect_uris`, so the bridge cannot be running without an
+  # allowlist to bound where codes may go.
+  #
+  # @return [Boolean]
+  def oauth_bridge?
+    authority? && Array(oauth_allowed_redirect_uris).any?
   end
 
   # Full introspection URL the satellite POSTs to. Raises a clear error if the

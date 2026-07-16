@@ -30,7 +30,8 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
       end
 
       def request
-        @request ||= Struct.new(:headers, :body).new(request_headers, StringIO.new(request_body.to_s))
+        @request ||= Struct.new(:headers, :body, :base_url)
+                           .new(request_headers, StringIO.new(request_body.to_s), "https://mcp.example.test")
       end
 
       def response
@@ -250,6 +251,29 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
 
       expect(controller.send(:mcp_principal)).to be(token)
       expect(token).to have_received(:touch_last_used!)
+    end
+
+    # A hosted MCP client will not start an authorization flow off a bare 401; this
+    # header is what tells it where to look. See McpToolkit::Oauth::ControllerMethods.
+    context "when the OAuth bridge is configured" do
+      before do
+        McpToolkit.config.auth_role = :authority
+        McpToolkit.config.oauth_allowed_redirect_uris = ["https://client.example/callback"]
+      end
+
+      it "challenges an unauthenticated caller with the protected-resource metadata url" do
+        controller.send(:mcp_authenticate!)
+
+        expect(controller.response.headers["WWW-Authenticate"]).to eq(
+          %(Bearer resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource")
+        )
+      end
+    end
+
+    it "leaves the 401 unchallenged when the bridge is not configured (an opted-out host is unaffected)" do
+      controller.send(:mcp_authenticate!)
+
+      expect(controller.response.headers).not_to have_key("WWW-Authenticate")
     end
   end
 
