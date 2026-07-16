@@ -648,19 +648,16 @@ class McpToolkit::Configuration
   # Where the protected-resource metadata (RFC 9728) answers, and where
   # `WWW-Authenticate` points.
   #
-  # The resource path is INSERTED between the well-known prefix and nothing else
-  # — `/.well-known/oauth-protected-resource/mcp`, not the bare
-  # `/.well-known/oauth-protected-resource`. That is RFC 9728 §3.1's path-scoping
-  # rule, and it is deliberate: the BARE well-known paths are ORIGIN-GLOBAL. They
-  # describe "the authorization server / protected resource of this whole origin",
-  # which on a host that already runs an unrelated OAuth provider (a REST API's,
-  # say) is that provider's claim to make, not an MCP server's. Scoping by the
-  # mount path lets both coexist — RFC 8414 §3.1 says so in as many words:
-  # "Using path components enables supporting multiple issuers per host."
+  # Path-SCOPED (`/.well-known/oauth-protected-resource/mcp`), never the bare
+  # path, because the bare ones are ORIGIN-GLOBAL: they describe the authorization
+  # server of the whole origin, which on a host already running an unrelated OAuth
+  # provider is that provider's claim to make, not an MCP server's. RFC 8414 §3.1
+  # exists for this — "Using path components enables supporting multiple issuers
+  # per host" — and MCP's 2025-11-25 authorization spec gives a path-ful issuer no
+  # root fallback, so scoping is the correct reading rather than a workaround.
   #
-  # A host whose MCP endpoint IS the origin root has no path to insert, so it gets
-  # the bare paths — correct there, because on that origin it really is the only
-  # authorization server.
+  # A root-mounted endpoint has no path to insert and gets the bare paths, which is
+  # correct there: it really is that origin's only authorization server.
   #
   # @return [String]
   def oauth_protected_resource_path
@@ -669,8 +666,7 @@ class McpToolkit::Configuration
 
   # Where the authorization-server metadata (RFC 8414) answers. Path-inserted for
   # the same reason, and it MUST agree with the issuer: a client constructs this
-  # URL from the issuer it was given, and the document's `issuer` must match the
-  # identifier used to construct it.
+  # URL from the issuer it was given.
   #
   # @return [String]
   def oauth_authorization_server_path

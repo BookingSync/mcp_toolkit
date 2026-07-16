@@ -1,80 +1,27 @@
 # frozen_string_literal: true
 
-# The AUTHORITY-side OAuth 2.1 authorization bridge, provided as an includable
-# concern.
+# The AUTHORITY-side OAuth 2.1 authorization bridge (routes: config/routes.rb;
+# setup + rationale: README).
 #
-# WHY THIS EXISTS. Hosted MCP clients will not send a bearer token an operator
-# typed into a config file: they discover an authorization server, run an
-# authorization-code + PKCE flow in a browser, and use whatever `access_token`
-# comes back. The MCP authorization spec also forbids a token in the request URI
-# query string, so `?token=<...>` is not an option for those clients either.
+# NOT an identity provider, and reading it as a half-built one will mislead. It
+# mints no credential, stores no client, models no consent, issues no refresh
+# token. It is a standards-shaped envelope around tokens the host ALREADY issues
+# by its own means, for clients that will only authenticate by discovering an
+# authorization server and running a browser flow: the page asks an operator to
+# paste a token they hold, and the `access_token` returned IS that token, verified
+# through the same `config.token_authenticator` the transport uses. Scopes,
+# expiry, revocation and tenancy stay with the host; nothing here widens reach.
 #
-# WHAT THIS IS NOT. This is not an identity provider. It mints no credential,
-# stores no client, models no consent, and issues no refresh token. It is a
-# STANDARDS-SHAPED ENVELOPE around tokens the host ALREADY issues by its own
-# means: the authorization page asks the operator to paste an existing access
-# token, and the `access_token` this bridge hands back IS that token, verified
-# through the same `config.token_authenticator` the transport uses. Every
-# property that actually gates access — scopes, expiry, revocation, tenancy —
-# stays exactly where the host put it. Nothing here widens who can reach what.
+# So the stubs are deliberate, not unfinished: no endpoint reads the `client_id`
+# it hands out (a public client's identifier is self-asserted and gates nothing);
+# pasting a token you already hold IS the grant; and the pasted token's own expiry
+# is the real lifetime, so a client re-runs the flow rather than refreshing a
+# shadow of it.
 #
-# The deliberate no-ops, so a reader does not mistake them for oversights:
-#   * client registration returns a fresh identifier and stores nothing; no
-#     endpoint ever checks a `client_id`, because a public client's identifier is
-#     self-asserted and gates nothing on its own;
-#   * there is no consent step — the operator pasting a token they already hold
-#     IS the grant;
-#   * no refresh token is issued. The pasted token's own expiry is the real
-#     lifetime, so a client re-runs this flow rather than refreshing a shadow of
-#     it.
-#
-# The two things that are NOT mocked, because faking them would create a real
-# vulnerability rather than skip a ceremony:
-#   * `redirect_uri` is matched against `config.oauth_allowed_redirect_uris` by
-#     exact string, on BOTH legs. An unvetted redirect target here would be an
-#     open redirect that hands out authorization codes.
-#   * the PKCE `code_verifier` is verified against the stored `code_challenge`.
-#     It is a few lines and it is what stops an intercepted code from being
-#     redeemed by anyone but its requester.
-#
-# Endpoints, for an engine mounted at `/mcp` (every path below follows the mount)
-#   GET  /.well-known/oauth-protected-resource/mcp   - protected-resource metadata (RFC 9728)
-#   GET  /.well-known/oauth-authorization-server/mcp - authorization-server metadata (RFC 8414)
-#   POST /mcp/oauth/register                         - client registration (RFC 7591), a stub
-#   GET  /mcp/oauth/authorize                        - the paste-your-token page
-#   POST /mcp/oauth/authorize                        - validate the paste, issue a code
-#   POST /mcp/oauth/token                            - exchange code (+ verifier) for the token
-#
-# ADDITIVE TO A HOST'S OWN OAUTH — IT CLAIMS NOTHING ORIGIN-GLOBAL. The flow
-# endpoints live under the engine's mount, so a host already running an OAuth
-# provider at the conventional top-level `/oauth/*` — as an app with Doorkeeper
-# for its own API does — keeps every one of those routes. And the two metadata
-# documents are PATH-SCOPED (`/.well-known/oauth-*/mcp`), never the bare
-# `/.well-known/oauth-authorization-server`: that bare path is origin-global and
-# means "the authorization server of this whole origin", which belongs to that
-# pre-existing provider, not to an MCP server bolted onto the same host. RFC 8414
-# §3.1 exists for precisely this — "Using path components enables supporting
-# multiple issuers per host" — and the MCP authorization spec (2025-11-25)
-# requires a client given a path-ful issuer to try the path-INSERTED URLs, with no
-# root fallback. Scoping is therefore the correct reading, not a workaround.
-#
-# A host whose MCP endpoint IS its origin root (a dedicated MCP domain) has no
-# path to insert and gets the bare paths — correct there, since it really is that
-# origin's only authorization server.
-#
-# The metadata must answer at the host's own route set (an engine mounted under a
-# path cannot draw a `/.well-known/*` path), so the host draws them in one line:
-#
-#   # config/routes.rb — top level, NOT inside a locale/format scope
-#   McpToolkit.draw_oauth_metadata_routes(self)
-#
-# Rendering: the authorization page is an HTML view, so this controller is built
-# from `config.oauth_parent_controller` (default ActionController::Base) rather
-# than the `parent_controller` the transport uses — that one is typically
-# ActionController::API, which cannot render a view, and enabling the bridge must
-# not force a host to weaken it. A host restyles the page by defining its own
-# `app/views/mcp_toolkit/oauth/authorize.html.erb`, which takes precedence over
-# the engine's.
+# Two things are NOT mocked, because faking them would be a vulnerability rather
+# than a skipped ceremony: `redirect_uri` is exact-matched against the allowlist
+# on BOTH legs (an unvetted target is an open redirect handing out authorization
+# codes), and the PKCE `code_verifier` is verified.
 module McpToolkit::Oauth::ControllerMethods
   extend ActiveSupport::Concern
 
@@ -82,19 +29,14 @@ module McpToolkit::Oauth::ControllerMethods
   CODE_BYTES = 32
 
   included do
-    # The token endpoint is called server-to-server by the client with no CSRF
-    # token; the authorization form posts with one. Skipping forgery protection
-    # for the former only would need per-action config on a dynamically built
-    # class, so the form carries its own guarantee instead: `approve` never acts
-    # on ambient authority (no cookie, no session), only on a pasted token, and
-    # its sole side effect redirects to an allowlisted URI.
+    # Safe to disable: the token endpoint is called server-to-server without a CSRF
+    # token, and `approve` never acts on ambient authority — no cookie, no session,
+    # only a pasted token, redirecting to an allowlisted URI.
     protect_from_forgery with: :null_session if respond_to?(:protect_from_forgery)
   end
 
-  # GET /.well-known/oauth-protected-resource
-  # Points a client at this app as its own authorization server. `resource` MUST
-  # equal the MCP endpoint URL as the operator typed it into the client, so it is
-  # derived from the live request origin rather than pinned to one host.
+  # `resource` MUST equal the MCP endpoint URL as the operator typed it into the
+  # client, hence derived from the live request origin rather than pinned.
   def protected_resource
     render json: {
       resource: mcp_oauth_resource_url,
@@ -103,9 +45,8 @@ module McpToolkit::Oauth::ControllerMethods
     }
   end
 
-  # GET /.well-known/oauth-authorization-server
-  # Advertises S256 because clients send a `code_challenge` regardless; `none`
-  # for token-endpoint auth because clients here are public and unverified.
+  # S256 because clients send a `code_challenge` regardless; `none` because the
+  # clients here are public and unverified.
   def authorization_server
     render json: {
       issuer: mcp_oauth_issuer,
@@ -119,10 +60,8 @@ module McpToolkit::Oauth::ControllerMethods
     }
   end
 
-  # POST <mcp>/oauth/register
-  # Deliberately stateless: hand back an identifier, remember nothing. Nothing
-  # downstream reads it, so persisting it would only grow a table of strings the
-  # bridge never consults.
+  # Stateless: persisting a `client_id` nothing reads would only grow a table of
+  # strings the bridge never consults.
   def register
     render json: {
       client_id: SecureRandom.uuid,
@@ -132,7 +71,6 @@ module McpToolkit::Oauth::ControllerMethods
     }, status: :created
   end
 
-  # GET <mcp>/oauth/authorize — renders the paste-your-token page.
   def authorize
     problem = mcp_oauth_request_problem
     return mcp_oauth_render_bad_request(problem) if problem
@@ -140,9 +78,8 @@ module McpToolkit::Oauth::ControllerMethods
     render :authorize, layout: false
   end
 
-  # POST <mcp>/oauth/authorize — verify the pasted token, mint a code, hand the
-  # client back to its redirect_uri. The token is verified here (rather than only
-  # at exchange) so a typo fails on the page the operator is looking at.
+  # The token is verified here, not only at exchange, so a typo fails on the page
+  # the operator is looking at.
   def approve
     problem = mcp_oauth_request_problem
     return mcp_oauth_render_bad_request(problem) if problem
@@ -153,7 +90,6 @@ module McpToolkit::Oauth::ControllerMethods
     redirect_to mcp_oauth_callback_url(mcp_oauth_issue_code(access_token)), allow_other_host: true
   end
 
-  # POST <mcp>/oauth/token — exchange a one-time code for the pasted token.
   def token
     return mcp_oauth_render_token_error("unsupported_grant_type") unless params[:grant_type] == "authorization_code"
 
@@ -175,9 +111,8 @@ module McpToolkit::Oauth::ControllerMethods
 
   # ---- request validation ---------------------------------------------------
 
-  # The only two things worth refusing outright. A disallowed redirect_uri must
-  # never be redirected TO (that is the attack), so both problems render here
-  # instead of bouncing an OAuth error back to the caller.
+  # Both problems render rather than bounce an OAuth error back to the caller: a
+  # disallowed redirect_uri must never be redirected TO — that is the attack.
   def mcp_oauth_request_problem
     return mcp_oauth_reject_redirect_uri unless mcp_oauth_redirect_uri_allowed?
     return "Missing or unsupported PKCE code_challenge." unless mcp_oauth_code_challenge_supported?
@@ -185,12 +120,9 @@ module McpToolkit::Oauth::ControllerMethods
     nil
   end
 
-  # An exact-match allowlist is unforgiving by design, which makes a legitimate
-  # client rejected over a callback URL that differs in some invisible way (a
-  # trailing slash, a changed path) look identical to an attack. Log the value that
-  # was actually offered so the first failed connection names the string to
-  # allowlist, rather than leaving an operator to guess it. Safe to log: it is the
-  # client's own public callback, never a credential.
+  # Exact matching makes a legitimate client rejected over a trailing slash look
+  # identical to an attack, so log the offered value (a public callback, never a
+  # credential) — otherwise an operator is left guessing what to allowlist.
   def mcp_oauth_reject_redirect_uri
     mcp_oauth_config.logger&.warn(
       "[mcp_toolkit] OAuth authorize rejected: redirect_uri #{params[:redirect_uri].inspect} is not in " \
@@ -257,19 +189,14 @@ module McpToolkit::Oauth::ControllerMethods
 
   # ---- urls -----------------------------------------------------------------
 
-  # The issuer, which is the MCP endpoint URL itself — deliberately path-ful.
-  #
-  # A client constructs the authorization-server metadata URL from this by RFC
-  # 8414 §3.1 path INSERTION (`https://host/.well-known/oauth-authorization-server/mcp`),
-  # which is the whole reason the bridge never claims the origin-global bare path.
-  # It also means issuer path == resource path, the shape that keeps a client
-  # deriving the same URL whether it builds candidates from the issuer or from the
-  # resource.
+  # Deliberately path-ful: a client path-INSERTS this to find the metadata, which
+  # is what keeps the bridge off the origin-global bare path (see
+  # Configuration#oauth_protected_resource_path). Issuer path == resource path, so
+  # a client derives the same URL from either.
   def mcp_oauth_issuer
     mcp_oauth_resource_url
   end
 
-  # The MCP endpoint itself — origin + the engine's mount path.
   def mcp_oauth_resource_url
     "#{request.base_url}#{mcp_oauth_config.oauth_resource_path_component}"
   end
