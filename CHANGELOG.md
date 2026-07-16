@@ -28,18 +28,27 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   `code_challenge`.
 
   Endpoints — `GET`/`POST` `<mcp>/oauth/authorize`, `POST <mcp>/oauth/token`,
-  `POST <mcp>/oauth/register`, plus the two metadata documents
-  (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`).
-  The metadata must answer at the ORIGIN ROOT, which an engine mounted under a path
-  cannot draw, so a host adds one line at the top level of its route set:
-  `McpToolkit.draw_oauth_metadata_routes(self)` (a no-op unless the bridge is
-  configured). Every identifier is derived from the live request origin, so each
-  host name an app answers on works without further configuration.
-  **Additive to a host's own OAuth provider.** Every bridge endpoint lives under
-  the engine's mount (`<mcp>/oauth/*`), so a host already serving OAuth at the
-  conventional top-level `/oauth/*` — as an app with Doorkeeper for its own API
-  does — keeps every one of those routes. The only host-level paths the bridge
-  claims are the two `.well-known` metadata documents.
+  `POST <mcp>/oauth/register`, plus the two metadata documents. A `/.well-known/*`
+  path cannot be drawn by an engine mounted under a path, so a host adds one line at
+  the top level of its route set: `McpToolkit.draw_oauth_metadata_routes(self)` (a
+  no-op unless the bridge is configured). Every identifier is derived from the live
+  request origin, so each host name an app answers on works without further
+  configuration.
+
+  **Additive to a host's own OAuth provider, and it claims nothing origin-global.**
+  The flow endpoints live under the engine's mount (`<mcp>/oauth/*`), so a host
+  already serving OAuth at the conventional top-level `/oauth/*` — as an app with
+  Doorkeeper for its own API does — keeps every one of those routes. The metadata
+  documents are PATH-SCOPED to the mount
+  (`/.well-known/oauth-protected-resource/mcp`), never the bare
+  `/.well-known/oauth-authorization-server`: the bare paths are origin-global and
+  mean "the authorization server of this whole origin", which belongs to that
+  pre-existing provider. RFC 8414 §3.1 exists for exactly this ("Using path
+  components enables supporting multiple issuers per host"), and the MCP
+  authorization spec (2025-11-25) requires a client given a path-ful issuer to try
+  the path-INSERTED URLs with no root fallback — so the issuer is the MCP endpoint
+  URL itself. A host mounted AT its origin root has no path to insert and gets the
+  bare paths, which is correct there.
 - `config.oauth_allowed_redirect_uris` (default `[]`), `config.oauth_resource_path`
   (default `"/mcp"` — must match the engine's mount point),
   `config.oauth_authorization_code_ttl` (default `60`), and

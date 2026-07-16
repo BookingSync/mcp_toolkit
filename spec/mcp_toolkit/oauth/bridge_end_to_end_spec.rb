@@ -136,18 +136,22 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     result["unauthenticated_status"] = session.last_response.status
     result["www_authenticate"] = session.last_response.headers["WWW-Authenticate"]
 
-    # 2 + 3. Discovery, at the paths a client probes.
-    session.get("/.well-known/oauth-protected-resource")
+    # 2 + 3. Discovery, at the PATH-SCOPED locations (RFC 9728 §3.1 / RFC 8414 §3.1).
+    session.get("/.well-known/oauth-protected-resource/mcp")
     result["prm_status"] = session.last_response.status
     result["prm"] = JSON.parse(session.last_response.body)
 
-    # The path-suffixed probe a client tries before the bare path.
-    session.get("/.well-known/oauth-protected-resource/mcp")
-    result["prm_suffixed_status"] = session.last_response.status
-
-    session.get("/.well-known/oauth-authorization-server")
+    session.get("/.well-known/oauth-authorization-server/mcp")
     result["as_status"] = session.last_response.status
     result["as"] = JSON.parse(session.last_response.body)
+
+    # The bare, ORIGIN-GLOBAL well-known paths must stay untouched — they describe
+    # the whole origin's authorization server, which on a host already running one
+    # is that provider's to claim. Nothing here may answer them.
+    session.get("/.well-known/oauth-protected-resource")
+    result["bare_prm_status"] = session.last_response.status
+    session.get("/.well-known/oauth-authorization-server")
+    result["bare_as_status"] = session.last_response.status
 
     # 4. Client registration.
     session.post("/mcp/oauth/register", JSON.generate({ redirect_uris: [REDIRECT_URI] }),
@@ -234,11 +238,10 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       expect(@result.fetch("host_token_info")).to eq("HOST_TOKEN_INFO")
     end
 
-    it "claims nothing at host level beyond the two metadata documents" do
+    it "claims nothing at host level beyond the two path-scoped metadata documents" do
       expect(@result.fetch("host_level_paths")).to contain_exactly(
-        "/.well-known/oauth-protected-resource",
-        "/.well-known/oauth-protected-resource/*mcp_path",
-        "/.well-known/oauth-authorization-server"
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server/mcp"
       )
     end
 
@@ -266,32 +269,35 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     it "challenges an unauthenticated caller with a resource_metadata pointer" do
       expect(@result.fetch("unauthenticated_status")).to eq(401)
       expect(@result.fetch("www_authenticate")).to eq(
-        %(Bearer resource_metadata="http://example.org/.well-known/oauth-protected-resource")
+        %(Bearer resource_metadata="http://example.org/.well-known/oauth-protected-resource/mcp")
       )
     end
   end
 
   describe "discovery" do
-    it "answers protected-resource metadata at the origin root, identifying the MCP endpoint" do
+    it "answers protected-resource metadata path-scoped under the mount" do
       expect(@result.fetch("prm_status")).to eq(200)
       expect(@result.fetch("prm")).to include(
         "resource" => "http://example.org/mcp",
-        "authorization_servers" => ["http://example.org"]
+        "authorization_servers" => ["http://example.org/mcp"]
       )
     end
 
-    it "also answers the path-suffixed probe a client tries first" do
-      expect(@result.fetch("prm_suffixed_status")).to eq(200)
-    end
-
-    it "answers authorization-server metadata at the origin root" do
+    it "answers authorization-server metadata at the path-INSERTED location" do
       expect(@result.fetch("as_status")).to eq(200)
       expect(@result.fetch("as")).to include(
-        "issuer" => "http://example.org",
+        "issuer" => "http://example.org/mcp",
         "authorization_endpoint" => "http://example.org/mcp/oauth/authorize",
         "token_endpoint" => "http://example.org/mcp/oauth/token",
         "code_challenge_methods_supported" => ["S256"]
       )
+    end
+
+    # The load-bearing one for a host that already runs its own OAuth: the bare
+    # well-known paths are origin-global and must remain that provider's to claim.
+    it "leaves BOTH origin-global well-known paths unclaimed" do
+      expect(@result.fetch("bare_prm_status")).to eq(404)
+      expect(@result.fetch("bare_as_status")).to eq(404)
     end
   end
 

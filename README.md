@@ -432,17 +432,17 @@ end
 ```
 
 ```ruby
-# config/routes.rb — the helper call must be TOP LEVEL, since the two metadata
-# documents have to answer at the origin root (an engine mounted under a path
-# cannot draw them). It is a no-op unless the bridge is configured.
+# config/routes.rb — the helper call must be TOP LEVEL. A `/.well-known/*` path
+# cannot be drawn by an engine mounted under a path, so the metadata routes have
+# to live in your own route set. A no-op unless the bridge is configured.
 Rails.application.routes.draw do
   McpToolkit.draw_oauth_metadata_routes(self)
   mount McpToolkit::Engine => "/mcp"
 end
 ```
 
-That yields the whole flow — `GET /.well-known/oauth-protected-resource`,
-`GET /.well-known/oauth-authorization-server`, `POST /mcp/oauth/register`,
+That yields the whole flow — `GET /.well-known/oauth-protected-resource/mcp`,
+`GET /.well-known/oauth-authorization-server/mcp`, `POST /mcp/oauth/register`,
 `GET`/`POST /mcp/oauth/authorize`, `POST /mcp/oauth/token` — plus a
 `WWW-Authenticate: Bearer resource_metadata="..."` header on the transport's 401,
 which is what makes a client start the flow at all. Every identifier is derived
@@ -461,12 +461,25 @@ than a skipped ceremony: `redirect_uri` is matched against
 target would be an open redirect that emits authorization codes — and the PKCE
 `code_verifier` is verified against the stored S256 challenge.
 
-**It is additive to an OAuth provider you already run.** Every bridge endpoint
-lives under the engine's mount (`/mcp/oauth/*`), so if you already serve OAuth at
-the conventional top-level `/oauth/*` — as an app with Doorkeeper for its own API
-does — you keep every one of those routes. The only host-level paths the bridge
-claims are the two `.well-known` metadata documents, which have to answer at the
-origin root.
+**It is additive to an OAuth provider you already run, and it claims nothing
+origin-global.** The flow endpoints live under the engine's mount
+(`/mcp/oauth/*`), so if you already serve OAuth at the conventional top-level
+`/oauth/*` — as an app with Doorkeeper for its own API does — you keep every one of
+those routes.
+
+The metadata documents are **path-scoped** to the mount
+(`/.well-known/oauth-protected-resource/mcp`), never the bare
+`/.well-known/oauth-authorization-server`. That matters: the bare paths are
+origin-global and mean *"the authorization server of this whole origin"*, which
+belongs to a provider you already run, not to an MCP server sharing the host.
+RFC 8414 §3.1 exists for exactly this — *"Using path components enables supporting
+multiple issuers per host"* — and the MCP authorization spec (2025-11-25) requires
+a client given a path-ful issuer to try the path-**inserted** URLs, with no root
+fallback. So the issuer is your MCP endpoint URL, and both documents hang off it.
+
+If your MCP endpoint IS its origin root (a dedicated MCP domain), there is no path
+to insert and you get the bare paths — correct there, since your server really is
+that origin's only authorization server. Set `oauth_resource_path = "/"`.
 
 `oauth_allowed_redirect_uris` is empty by default, which leaves
 `config.oauth_bridge?` false and the routes undrawn — the bridge cannot run without

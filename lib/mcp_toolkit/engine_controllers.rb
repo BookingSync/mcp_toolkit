@@ -120,9 +120,9 @@ module McpToolkit
     Class.new(parent) { include McpToolkit::Authority::ControllerMethods }
   end
 
-  # Draws the OAuth bridge's two metadata documents at the ORIGIN ROOT, where a
-  # client looks for them and where an engine mounted under a path cannot reach.
-  # The host calls this at the TOP LEVEL of its own route set — not inside a
+  # Draws the OAuth bridge's two metadata documents. A `/.well-known/*` path
+  # cannot be drawn by an engine mounted under a path, so it has to live in the
+  # host's own route set. The host calls this at the TOP LEVEL — not inside a
   # locale/format/constraint scope, which would prefix the paths out of view:
   #
   #   # config/routes.rb
@@ -132,18 +132,20 @@ module McpToolkit
   #     # ...
   #   end
   #
-  # A no-op unless the bridge is configured, so the call can sit in a host's
-  # routes unconditionally across environments. The path-suffixed
-  # protected-resource route covers clients that probe
-  # `/.well-known/oauth-protected-resource/<mcp-path>` before the bare path.
+  # The paths are PATH-SCOPED to the engine's mount
+  # (`/.well-known/oauth-protected-resource/mcp`), so this claims NOTHING
+  # origin-global and cannot collide with an OAuth provider the host already runs
+  # — see Configuration#oauth_protected_resource_path for why that matters. A host
+  # mounted at its origin root gets the bare paths instead, which is correct there.
+  #
+  # A no-op unless the bridge is configured, so the call can sit in a host's routes
+  # unconditionally across environments.
   def self.draw_oauth_metadata_routes(mapper)
     return unless config.oauth_bridge?
 
-    mapper.get McpToolkit::Oauth::ControllerMethods::PROTECTED_RESOURCE_PATH,
+    mapper.get config.oauth_protected_resource_path,
                to: "mcp_toolkit/oauth#protected_resource", format: false
-    mapper.get "#{McpToolkit::Oauth::ControllerMethods::PROTECTED_RESOURCE_PATH}/*mcp_path",
-               to: "mcp_toolkit/oauth#protected_resource", format: false
-    mapper.get McpToolkit::Oauth::ControllerMethods::AUTHORIZATION_SERVER_PATH,
+    mapper.get config.oauth_authorization_server_path,
                to: "mcp_toolkit/oauth#authorization_server", format: false
   end
 

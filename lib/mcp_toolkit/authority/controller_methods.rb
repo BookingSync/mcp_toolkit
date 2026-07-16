@@ -395,12 +395,15 @@ module McpToolkit::Authority::ControllerMethods
   # Points an unauthenticated caller at the OAuth bridge's protected-resource
   # metadata (RFC 9728). This header is what a hosted MCP client waits for before
   # it will start an authorization flow at all — without it, a 401 is just a
-  # failure. Emitted only when the bridge is configured, so a host that has not
-  # opted in keeps its 401 byte-identical.
+  # failure. It also makes the metadata's location OURS to state rather than the
+  # client's to guess: RFC 9728 has the client fetch this URL directly, so the
+  # path-scoped location is found without probing the origin's bare well-known
+  # path. Emitted only when the bridge is configured, so a host that has not opted
+  # in keeps its 401 byte-identical.
   def mcp_set_authenticate_challenge
     return unless mcp_config.oauth_bridge?
 
-    metadata_url = "#{request.base_url}#{McpToolkit::Oauth::ControllerMethods::PROTECTED_RESOURCE_PATH}"
+    metadata_url = "#{request.base_url}#{mcp_config.oauth_protected_resource_path}"
     response.headers["WWW-Authenticate"] = %(Bearer resource_metadata="#{metadata_url}")
   end
 

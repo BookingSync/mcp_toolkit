@@ -71,12 +71,12 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   end
 
   describe "#protected_resource" do
-    it "identifies the MCP endpoint from the live origin and points at this app as the authorization server" do
+    it "identifies the MCP endpoint from the live origin and points at it as the authorization server" do
       controller.protected_resource
 
       expect(controller.rendered[:options][:json]).to eq(
         resource: "https://mcp.example.test/mcp",
-        authorization_servers: ["https://mcp.example.test"],
+        authorization_servers: ["https://mcp.example.test/mcp"],
         bearer_methods_supported: ["header"]
       )
     end
@@ -89,14 +89,48 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
     end
   end
 
+  # The bare well-known paths are ORIGIN-GLOBAL: they describe the authorization
+  # server of the whole host, which on an origin already running an unrelated
+  # OAuth provider is that provider's to claim. Path-scoping (RFC 8414 §3.1 /
+  # RFC 9728 §3.1) is what lets both live on one host.
+  describe "metadata locations" do
+    it "scopes both documents under the engine's mount, claiming nothing at the origin root" do
+      expect(McpToolkit.config.oauth_protected_resource_path).to eq("/.well-known/oauth-protected-resource/mcp")
+      expect(McpToolkit.config.oauth_authorization_server_path).to eq("/.well-known/oauth-authorization-server/mcp")
+    end
+
+    it "issues a path-ful issuer, so a client path-INSERTS and never probes the origin root" do
+      controller.authorization_server
+      issuer = controller.rendered[:options][:json][:issuer]
+
+      expect(issuer).to eq("https://mcp.example.test/mcp")
+      # The document's issuer must equal the identifier used to construct its URL.
+      expect(URI.parse(issuer).path).to eq(McpToolkit.config.oauth_resource_path_component)
+    end
+
+    it "falls back to the bare paths only for an endpoint mounted AT the origin root" do
+      McpToolkit.config.oauth_resource_path = "/"
+
+      expect(McpToolkit.config.oauth_protected_resource_path).to eq("/.well-known/oauth-protected-resource")
+      expect(McpToolkit.config.oauth_authorization_server_path).to eq("/.well-known/oauth-authorization-server")
+    end
+
+    it "drops a trailing slash rather than emitting a doubled one" do
+      McpToolkit.config.oauth_resource_path = "/mcp/"
+
+      expect(McpToolkit.config.oauth_protected_resource_path).to eq("/.well-known/oauth-protected-resource/mcp")
+      expect(McpToolkit.config.oauth_resource_path_component).to eq("/mcp")
+    end
+  end
+
   describe "#authorization_server" do
     subject(:metadata) do
       controller.authorization_server
       controller.rendered[:options][:json]
     end
 
-    it "advertises the origin as issuer so an RFC 8414 lookup lands on the drawn root path" do
-      expect(metadata[:issuer]).to eq("https://mcp.example.test")
+    it "advertises the path-ful MCP endpoint as issuer, so an RFC 8414 lookup path-inserts" do
+      expect(metadata[:issuer]).to eq("https://mcp.example.test/mcp")
     end
 
     it "advertises S256, which clients send a challenge for regardless" do

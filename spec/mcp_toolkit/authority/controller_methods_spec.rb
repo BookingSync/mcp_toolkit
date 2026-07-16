@@ -261,11 +261,13 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
         McpToolkit.config.oauth_allowed_redirect_uris = ["https://client.example/callback"]
       end
 
-      it "challenges an unauthenticated caller with the protected-resource metadata url" do
+      # Path-scoped: stating the location outright is also what keeps a client from
+      # probing the origin's bare, globally-meaningful well-known path.
+      it "challenges an unauthenticated caller with the path-scoped protected-resource metadata url" do
         controller.send(:mcp_authenticate!)
 
         expect(controller.response.headers["WWW-Authenticate"]).to eq(
-          %(Bearer resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource")
+          %(Bearer resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource/mcp")
         )
       end
     end

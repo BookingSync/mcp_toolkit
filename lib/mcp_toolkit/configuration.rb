@@ -137,10 +137,14 @@ class McpToolkit::Configuration
   attr_accessor :oauth_allowed_redirect_uris
 
   # The path McpToolkit::Engine is mounted at, used to build the `resource`
-  # identifier and the bridge's own endpoint URLs (their origin comes from the
-  # live request, so every host name the app answers on works). MUST match the
-  # actual mount point, and the `resource` it yields MUST equal the MCP endpoint
-  # URL as an operator types it into their client.
+  # identifier, the issuer, the two metadata locations, and the bridge's own
+  # endpoint URLs (their origin comes from the live request, so every host name
+  # the app answers on works). MUST match the actual mount point, and the
+  # `resource` it yields MUST equal the MCP endpoint URL as an operator types it
+  # into their client.
+  #
+  # This path is ALSO what keeps the bridge out of the origin's global namespace
+  # — see `oauth_protected_resource_path`.
   #
   # @return [String]
   attr_accessor :oauth_resource_path
@@ -623,6 +627,54 @@ class McpToolkit::Configuration
   #   introspection.
   def authority?
     auth_role.to_sym == :authority
+  end
+
+  # The well-known prefixes the two metadata documents hang off. The resource
+  # path is INSERTED after these, never appended to the origin — see
+  # `oauth_protected_resource_path`.
+  PROTECTED_RESOURCE_WELL_KNOWN = "/.well-known/oauth-protected-resource"
+  AUTHORIZATION_SERVER_WELL_KNOWN = "/.well-known/oauth-authorization-server"
+
+  # `oauth_resource_path` normalized for URL building: no trailing slash, and
+  # empty when the MCP endpoint IS the origin root (where there is no path
+  # component to insert).
+  #
+  # @return [String] e.g. "/mcp", or "" for a root-mounted endpoint.
+  def oauth_resource_path_component
+    path = oauth_resource_path.to_s.chomp("/")
+    path == "/" ? "" : path
+  end
+
+  # Where the protected-resource metadata (RFC 9728) answers, and where
+  # `WWW-Authenticate` points.
+  #
+  # The resource path is INSERTED between the well-known prefix and nothing else
+  # — `/.well-known/oauth-protected-resource/mcp`, not the bare
+  # `/.well-known/oauth-protected-resource`. That is RFC 9728 §3.1's path-scoping
+  # rule, and it is deliberate: the BARE well-known paths are ORIGIN-GLOBAL. They
+  # describe "the authorization server / protected resource of this whole origin",
+  # which on a host that already runs an unrelated OAuth provider (a REST API's,
+  # say) is that provider's claim to make, not an MCP server's. Scoping by the
+  # mount path lets both coexist — RFC 8414 §3.1 says so in as many words:
+  # "Using path components enables supporting multiple issuers per host."
+  #
+  # A host whose MCP endpoint IS the origin root has no path to insert, so it gets
+  # the bare paths — correct there, because on that origin it really is the only
+  # authorization server.
+  #
+  # @return [String]
+  def oauth_protected_resource_path
+    "#{PROTECTED_RESOURCE_WELL_KNOWN}#{oauth_resource_path_component}"
+  end
+
+  # Where the authorization-server metadata (RFC 8414) answers. Path-inserted for
+  # the same reason, and it MUST agree with the issuer: a client constructs this
+  # URL from the issuer it was given, and the document's `issuer` must match the
+  # identifier used to construct it.
+  #
+  # @return [String]
+  def oauth_authorization_server_path
+    "#{AUTHORIZATION_SERVER_WELL_KNOWN}#{oauth_resource_path_component}"
   end
 
   # Whether the OAuth authorization bridge is live: its routes are drawn, and the

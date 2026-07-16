@@ -37,21 +37,33 @@
 #     It is a few lines and it is what stops an intercepted code from being
 #     redeemed by anyone but its requester.
 #
-# Endpoints (mount path `<mcp>` = wherever the host mounted McpToolkit::Engine)
-#   GET  /.well-known/oauth-protected-resource  - protected-resource metadata (RFC 9728)
-#   GET  /.well-known/oauth-authorization-server- authorization-server metadata (RFC 8414)
-#   POST <mcp>/oauth/register                   - client registration (RFC 7591), a stub
-#   GET  <mcp>/oauth/authorize                  - the paste-your-token page
-#   POST <mcp>/oauth/authorize                  - validate the paste, issue a code
-#   POST <mcp>/oauth/token                      - exchange code (+ verifier) for the token
+# Endpoints, for an engine mounted at `/mcp` (every path below follows the mount)
+#   GET  /.well-known/oauth-protected-resource/mcp   - protected-resource metadata (RFC 9728)
+#   GET  /.well-known/oauth-authorization-server/mcp - authorization-server metadata (RFC 8414)
+#   POST /mcp/oauth/register                         - client registration (RFC 7591), a stub
+#   GET  /mcp/oauth/authorize                        - the paste-your-token page
+#   POST /mcp/oauth/authorize                        - validate the paste, issue a code
+#   POST /mcp/oauth/token                            - exchange code (+ verifier) for the token
 #
-# ADDITIVE TO A HOST'S OWN OAUTH. Every endpoint above lives under the engine's
-# mount (`<mcp>/oauth/*`), so a host already running an OAuth provider at the
-# conventional top-level `/oauth/*` — as an app with Doorkeeper for its own API
-# does — keeps every one of those routes. The only host-level paths this claims
-# are the two `.well-known` metadata documents, which must answer at the ORIGIN
-# ROOT (an engine mounted under a path cannot draw them). The host draws those in
-# one line at the top level of its own route set:
+# ADDITIVE TO A HOST'S OWN OAUTH — IT CLAIMS NOTHING ORIGIN-GLOBAL. The flow
+# endpoints live under the engine's mount, so a host already running an OAuth
+# provider at the conventional top-level `/oauth/*` — as an app with Doorkeeper
+# for its own API does — keeps every one of those routes. And the two metadata
+# documents are PATH-SCOPED (`/.well-known/oauth-*/mcp`), never the bare
+# `/.well-known/oauth-authorization-server`: that bare path is origin-global and
+# means "the authorization server of this whole origin", which belongs to that
+# pre-existing provider, not to an MCP server bolted onto the same host. RFC 8414
+# §3.1 exists for precisely this — "Using path components enables supporting
+# multiple issuers per host" — and the MCP authorization spec (2025-11-25)
+# requires a client given a path-ful issuer to try the path-INSERTED URLs, with no
+# root fallback. Scoping is therefore the correct reading, not a workaround.
+#
+# A host whose MCP endpoint IS its origin root (a dedicated MCP domain) has no
+# path to insert and gets the bare paths — correct there, since it really is that
+# origin's only authorization server.
+#
+# The metadata must answer at the host's own route set (an engine mounted under a
+# path cannot draw a `/.well-known/*` path), so the host draws them in one line:
 #
 #   # config/routes.rb — top level, NOT inside a locale/format scope
 #   McpToolkit.draw_oauth_metadata_routes(self)
@@ -68,8 +80,6 @@ module McpToolkit::Oauth::ControllerMethods
 
   CODE_CACHE_PREFIX = "mcp_toolkit:oauth:code:"
   CODE_BYTES = 32
-  PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource"
-  AUTHORIZATION_SERVER_PATH = "/.well-known/oauth-authorization-server"
 
   included do
     # The token endpoint is called server-to-server by the client with no CSRF
@@ -247,15 +257,21 @@ module McpToolkit::Oauth::ControllerMethods
 
   # ---- urls -----------------------------------------------------------------
 
-  # The origin. Metadata answers at the origin root, so the issuer is the origin
-  # and a client's RFC 8414 lookup lands on a path we actually draw.
+  # The issuer, which is the MCP endpoint URL itself — deliberately path-ful.
+  #
+  # A client constructs the authorization-server metadata URL from this by RFC
+  # 8414 §3.1 path INSERTION (`https://host/.well-known/oauth-authorization-server/mcp`),
+  # which is the whole reason the bridge never claims the origin-global bare path.
+  # It also means issuer path == resource path, the shape that keeps a client
+  # deriving the same URL whether it builds candidates from the issuer or from the
+  # resource.
   def mcp_oauth_issuer
-    request.base_url
+    mcp_oauth_resource_url
   end
 
   # The MCP endpoint itself — origin + the engine's mount path.
   def mcp_oauth_resource_url
-    "#{request.base_url}#{mcp_oauth_config.oauth_resource_path}"
+    "#{request.base_url}#{mcp_oauth_config.oauth_resource_path_component}"
   end
 
   def mcp_oauth_endpoint_url(action)
