@@ -124,7 +124,8 @@ module McpToolkit::Oauth::ControllerMethods
 
   # GET <mcp>/oauth/authorize — renders the paste-your-token page.
   def authorize
-    return mcp_oauth_render_bad_request(mcp_oauth_request_problem) if mcp_oauth_request_problem
+    problem = mcp_oauth_request_problem
+    return mcp_oauth_render_bad_request(problem) if problem
 
     render :authorize, layout: false
   end
@@ -133,7 +134,8 @@ module McpToolkit::Oauth::ControllerMethods
   # client back to its redirect_uri. The token is verified here (rather than only
   # at exchange) so a typo fails on the page the operator is looking at.
   def approve
-    return mcp_oauth_render_bad_request(mcp_oauth_request_problem) if mcp_oauth_request_problem
+    problem = mcp_oauth_request_problem
+    return mcp_oauth_render_bad_request(problem) if problem
 
     access_token = params[:access_token].to_s
     return mcp_oauth_reject_paste if mcp_oauth_authenticate(access_token).nil?
@@ -167,10 +169,24 @@ module McpToolkit::Oauth::ControllerMethods
   # never be redirected TO (that is the attack), so both problems render here
   # instead of bouncing an OAuth error back to the caller.
   def mcp_oauth_request_problem
-    return "Unregistered redirect_uri." unless mcp_oauth_redirect_uri_allowed?
+    return mcp_oauth_reject_redirect_uri unless mcp_oauth_redirect_uri_allowed?
     return "Missing or unsupported PKCE code_challenge." unless mcp_oauth_code_challenge_supported?
 
     nil
+  end
+
+  # An exact-match allowlist is unforgiving by design, which makes a legitimate
+  # client rejected over a callback URL that differs in some invisible way (a
+  # trailing slash, a changed path) look identical to an attack. Log the value that
+  # was actually offered so the first failed connection names the string to
+  # allowlist, rather than leaving an operator to guess it. Safe to log: it is the
+  # client's own public callback, never a credential.
+  def mcp_oauth_reject_redirect_uri
+    mcp_oauth_config.logger&.warn(
+      "[mcp_toolkit] OAuth authorize rejected: redirect_uri #{params[:redirect_uri].inspect} is not in " \
+      "config.oauth_allowed_redirect_uris (#{Array(mcp_oauth_config.oauth_allowed_redirect_uris).inspect})"
+    )
+    "Unregistered redirect_uri."
   end
 
   def mcp_oauth_redirect_uri_allowed?

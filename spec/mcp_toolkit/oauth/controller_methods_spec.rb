@@ -153,6 +153,20 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       expect(controller.redirected_to).to be_nil
     end
 
+    # An exact-match allowlist makes "the client's callback has a trailing slash"
+    # indistinguishable from an attack, so the offered value has to be recoverable
+    # from the logs or an operator is left guessing it.
+    it "logs the offered redirect_uri and the allowlist, so a misconfiguration names itself" do
+      logger = instance_double(Logger, warn: nil)
+      McpToolkit.config.logger = logger
+      controller.params = authorize_params(redirect_uri: "https://client.example/callback/")
+      controller.authorize
+
+      expect(logger).to have_received(:warn).with(
+        a_string_including("https://client.example/callback/").and(a_string_including(redirect_uri))
+      )
+    end
+
     it "refuses a request with no PKCE challenge" do
       controller.params = authorize_params(code_challenge: nil)
       controller.authorize
