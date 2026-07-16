@@ -461,14 +461,26 @@ than a skipped ceremony: `redirect_uri` is matched against
 target would be an open redirect that emits authorization codes — and the PKCE
 `code_verifier` is verified against the stored S256 challenge.
 
-Two constraints worth knowing before you enable it. The bridge renders an HTML
-page, so `config.parent_controller` must descend from `ActionController::Base`
-(`ActionController::API` cannot render one); the transport itself is unaffected.
-And `oauth_allowed_redirect_uris` is empty by default, which leaves
-`config.oauth_bridge?` false and the routes undrawn — the bridge cannot run
-without bounds on where codes may go, and a satellite never draws it at all
-(its tokens belong to its central app, so there is nothing for it to authorize
-against).
+**It is additive to an OAuth provider you already run.** Every bridge endpoint
+lives under the engine's mount (`/mcp/oauth/*`), so if you already serve OAuth at
+the conventional top-level `/oauth/*` — as an app with Doorkeeper for its own API
+does — you keep every one of those routes. The only host-level paths the bridge
+claims are the two `.well-known` metadata documents, which have to answer at the
+origin root.
+
+`oauth_allowed_redirect_uris` is empty by default, which leaves
+`config.oauth_bridge?` false and the routes undrawn — the bridge cannot run without
+bounds on where codes may go, and a satellite never draws it at all (its tokens
+belong to its central app, so there is nothing for it to authorize against).
+
+The bridge's controller has its **own** parent, `config.oauth_parent_controller`
+(default `ActionController::Base`), deliberately separate from the
+`parent_controller` your transport uses. The transport is a JSON-only endpoint you
+may well have pointed at `ActionController::API`, which cannot render an HTML view
+— and the authorization page is one. Keeping them apart means enabling the bridge
+changes nothing about your transport. Point it at your own `ApplicationController`
+to inherit branding; the page renders with `layout: false` either way, so an app
+layout that needs asset-pipeline context is not pulled in.
 
 To restyle the page, define your own `app/views/mcp_toolkit/oauth/authorize.html.erb`
 — your app's view path takes precedence over the engine's.

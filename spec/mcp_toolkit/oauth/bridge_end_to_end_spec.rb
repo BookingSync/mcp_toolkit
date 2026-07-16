@@ -60,7 +60,10 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     end
 
     McpToolkit.configure do |c|
-      c.parent_controller = "ActionController::Base"
+      # Mirror a real authority: the MCP transport is a JSON-only endpoint, so its
+      # parent is ActionController::API — which CANNOT render an HTML view. The
+      # bridge's page is one, and it must render anyway (it has its own parent).
+      c.parent_controller = "ActionController::API"
       c.auth_role = :authority
       c.server_name = "example-mcp"
       c.oauth_allowed_redirect_uris = [REDIRECT_URI]
@@ -80,14 +83,52 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       config.hosts.clear # Rack::Test requests arrive as example.org
     end
 
+    # A host that ALREADY runs its own OAuth provider at the conventional
+    # top-level /oauth/* paths (the shape Doorkeeper draws). The bridge must not
+    # touch any of it.
+    class HostOauthController < ActionController::Base
+      def authorize = render(plain: "HOST_AUTHORIZE")
+      def token = render(plain: "HOST_TOKEN")
+      def token_info = render(plain: "HOST_TOKEN_INFO")
+    end
+
     app.initialize!
     app.routes.draw do
+      # Drawn BEFORE the bridge, as in a host whose use_doorkeeper call sits at the
+      # top of its route set — first match wins, so this is the order that would
+      # expose a collision.
+      get  "/oauth/authorize",  to: "host_oauth#authorize"
+      post "/oauth/token",      to: "host_oauth#token"
+      get  "/oauth/token/info", to: "host_oauth#token_info"
+
       McpToolkit.draw_oauth_metadata_routes(self)
       mount McpToolkit::Engine => "/mcp"
     end
 
     session = Rack::Test::Session.new(Rack::MockSession.new(app))
     result  = {}
+
+    # 0. The host's existing OAuth provider must answer exactly as before.
+    session.get("/oauth/authorize")
+    result["host_authorize"] = session.last_response.body
+    session.post("/oauth/token")
+    result["host_token"] = session.last_response.body
+    session.get("/oauth/token/info")
+    result["host_token_info"] = session.last_response.body
+
+    # 0b. Every path the bridge claims OUTSIDE its own engine mount. Anything here
+    # beyond the two metadata documents would be a land-grab on the host's routes.
+    result["host_level_paths"] = app.routes.routes.filter_map { |r|
+      path = r.path.spec.to_s.sub(/\(\.:format\)\z/, "")
+      next unless r.defaults[:controller].to_s.start_with?("mcp_toolkit/")
+      path
+    }
+    # And the engine's own set, which must stay under the mount.
+    result["engine_paths"] = McpToolkit::Engine.routes.routes.map { |r|
+      r.path.spec.to_s.sub(/\(\.:format\)\z/, "")
+    }
+    result["oauth_controller_parent"] = McpToolkit::OauthController.superclass.name
+    result["server_controller_parent"] = McpToolkit::ServerController.superclass.name
 
     # 1. An unauthenticated MCP call must point the client at the metadata.
     session.post("/mcp", JSON.generate({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
@@ -182,6 +223,43 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     raise "oauth bridge driver failed (#{status.exitstatus}):\n#{stderr}" unless status.success?
 
     @result = JSON.parse(stdout.lines.last)
+  end
+
+  # The bridge is additive to a host that already runs an OAuth provider (as an
+  # app with Doorkeeper for its own API does). It must not shadow one route of it.
+  describe "coexistence with a host's existing OAuth provider" do
+    it "leaves the host's /oauth/authorize, /oauth/token and /oauth/token/info untouched" do
+      expect(@result.fetch("host_authorize")).to eq("HOST_AUTHORIZE")
+      expect(@result.fetch("host_token")).to eq("HOST_TOKEN")
+      expect(@result.fetch("host_token_info")).to eq("HOST_TOKEN_INFO")
+    end
+
+    it "claims nothing at host level beyond the two metadata documents" do
+      expect(@result.fetch("host_level_paths")).to contain_exactly(
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/*mcp_path",
+        "/.well-known/oauth-authorization-server"
+      )
+    end
+
+    it "keeps every one of its own endpoints under the engine mount" do
+      expect(@result.fetch("engine_paths")).to contain_exactly(
+        "/", "/", "/", "/health", "/tokens/introspect",
+        "/oauth/authorize", "/oauth/authorize", "/oauth/token", "/oauth/register"
+      )
+    end
+  end
+
+  # The transport is JSON-only and its parent is ActionController::API, which
+  # cannot render HTML. Enabling the bridge must not force a host to change that.
+  describe "controller parents" do
+    it "leaves the transport on the host's ActionController::API parent" do
+      expect(@result.fetch("server_controller_parent")).to eq("ActionController::API")
+    end
+
+    it "builds the bridge from its own parent, so it can render a page" do
+      expect(@result.fetch("oauth_controller_parent")).to eq("ActionController::Base")
+    end
   end
 
   describe "the 401 that starts the flow" do

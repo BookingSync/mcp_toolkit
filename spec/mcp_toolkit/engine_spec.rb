@@ -62,6 +62,15 @@ RSpec.describe "Mountable engine + gem controller" do
         expect(McpToolkit::ServerController.include?(McpToolkit::Transport::ControllerMethods)).to be(false)
       end
     end
+
+    # The bridge's parent (default ActionController::Base) must not be
+    # constantized on a host that never enables it: that would pull view
+    # machinery into an API-only app and break a non-Rails host outright. Its
+    # absence here is what proves the build is skipped — this whole suite runs
+    # without Rails, so a constantize would raise NameError.
+    it "does not build the OAuth controller when the bridge is off" do
+      expect(McpToolkit.const_defined?(:OauthController, false)).to be(false)
+    end
   end
 
   describe "McpToolkit::Engine routes" do

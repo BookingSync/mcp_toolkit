@@ -37,7 +37,11 @@ module McpToolkit
     parent = config.parent_controller.constantize
     define_controller(self, :ServerController, build_server_controller(parent))
     define_controller(self, :TokensController, build_tokens_controller(parent))
-    define_controller(self, :OauthController, build_oauth_controller(parent))
+    # Only when the bridge is on — matching its routes, which are equally gated.
+    # Its parent (default ActionController::Base) would otherwise be constantized
+    # on every host, pulling view machinery into an API-only app that never
+    # enables the bridge, and breaking a non-Rails host outright.
+    define_controller(self, :OauthController, build_oauth_controller) if config.oauth_bridge?
     define_controller(Authority, :ServerController, build_authority_server_controller(parent))
     ServerController
   end
@@ -98,11 +102,16 @@ module McpToolkit
   end
 
   # The OAuth authorization bridge the engine mounts at `<mcp>/oauth/*` and the
-  # host draws at the two `.well-known` metadata paths. Built like its siblings so
-  # it picks up `config.parent_controller` — which, for this one, must descend from
-  # ActionController::Base, since the authorization page is an HTML view.
-  def self.build_oauth_controller(parent)
-    Class.new(parent) { include McpToolkit::Oauth::ControllerMethods }
+  # host draws at the two `.well-known` metadata paths.
+  #
+  # Built from `config.oauth_parent_controller`, NOT the `parent_controller` its
+  # siblings use: the transport is a JSON-only endpoint that a host rightly points
+  # at ActionController::API, which cannot render an HTML view — and this
+  # controller's authorization page is one. Sharing the parent would force a host
+  # to weaken its transport's superclass just to enable the bridge. Read lazily
+  # here, like the rest, so the host's initializer/to_prepare has already run.
+  def self.build_oauth_controller
+    Class.new(config.oauth_parent_controller.constantize) { include McpToolkit::Oauth::ControllerMethods }
   end
 
   # The AUTHORITY base controller a host subclasses (the recommended path for a

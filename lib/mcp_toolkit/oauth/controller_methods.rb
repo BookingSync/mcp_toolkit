@@ -45,16 +45,22 @@
 #   POST <mcp>/oauth/authorize                  - validate the paste, issue a code
 #   POST <mcp>/oauth/token                      - exchange code (+ verifier) for the token
 #
-# The two metadata documents must answer at the ORIGIN ROOT, which an engine
-# mounted under a path cannot draw. The host draws them in one line at the top
-# level of its own route set:
+# ADDITIVE TO A HOST'S OWN OAUTH. Every endpoint above lives under the engine's
+# mount (`<mcp>/oauth/*`), so a host already running an OAuth provider at the
+# conventional top-level `/oauth/*` — as an app with Doorkeeper for its own API
+# does — keeps every one of those routes. The only host-level paths this claims
+# are the two `.well-known` metadata documents, which must answer at the ORIGIN
+# ROOT (an engine mounted under a path cannot draw them). The host draws those in
+# one line at the top level of its own route set:
 #
 #   # config/routes.rb — top level, NOT inside a locale/format scope
 #   McpToolkit.draw_oauth_metadata_routes(self)
 #
-# Rendering: the authorization page is an HTML view, so the configured
-# `parent_controller` must descend from ActionController::Base (ActionController::API
-# cannot render one). A host restyles the page by defining its own
+# Rendering: the authorization page is an HTML view, so this controller is built
+# from `config.oauth_parent_controller` (default ActionController::Base) rather
+# than the `parent_controller` the transport uses — that one is typically
+# ActionController::API, which cannot render a view, and enabling the bridge must
+# not force a host to weaken it. A host restyles the page by defining its own
 # `app/views/mcp_toolkit/oauth/authorize.html.erb`, which takes precedence over
 # the engine's.
 module McpToolkit::Oauth::ControllerMethods

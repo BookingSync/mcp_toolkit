@@ -35,9 +35,15 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   `McpToolkit.draw_oauth_metadata_routes(self)` (a no-op unless the bridge is
   configured). Every identifier is derived from the live request origin, so each
   host name an app answers on works without further configuration.
+  **Additive to a host's own OAuth provider.** Every bridge endpoint lives under
+  the engine's mount (`<mcp>/oauth/*`), so a host already serving OAuth at the
+  conventional top-level `/oauth/*` — as an app with Doorkeeper for its own API
+  does — keeps every one of those routes. The only host-level paths the bridge
+  claims are the two `.well-known` metadata documents.
 - `config.oauth_allowed_redirect_uris` (default `[]`), `config.oauth_resource_path`
-  (default `"/mcp"` — must match the engine's mount point), and
-  `config.oauth_authorization_code_ttl` (default `60`).
+  (default `"/mcp"` — must match the engine's mount point),
+  `config.oauth_authorization_code_ttl` (default `60`), and
+  `config.oauth_parent_controller` (default `"ActionController::Base"`).
 - `config.oauth_bridge?` — whether the bridge is live. Gated on the authority role
   AND a non-empty redirect allowlist, so it cannot run without bounds on where codes
   may go, and a satellite (whose tokens belong to its central app) never draws it.
@@ -48,9 +54,13 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
 
 ### Notes
 
-- The bridge renders an HTML page, so a host enabling it must point
-  `config.parent_controller` at an `ActionController::Base` descendant
-  (`ActionController::API` cannot render one). The transport itself is unaffected.
+- The bridge's controller is built from its own `config.oauth_parent_controller`
+  rather than the `parent_controller` the transport uses. The transport is a
+  JSON-only endpoint whose parent is typically `ActionController::API`, which
+  cannot render an HTML view — and the authorization page is one. Keeping them
+  separate means enabling the bridge changes nothing about the transport. Point
+  `oauth_parent_controller` at your own `ApplicationController` to inherit app
+  branding; the page renders with `layout: false` either way.
 - A host restyles the page by defining its own
   `app/views/mcp_toolkit/oauth/authorize.html.erb`, which takes precedence over the
   engine's.

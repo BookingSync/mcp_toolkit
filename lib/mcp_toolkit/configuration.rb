@@ -152,6 +152,24 @@ class McpToolkit::Configuration
   # @return [Integer]
   attr_accessor :oauth_authorization_code_ttl
 
+  # The parent class of the bridge's controller, SEPARATE from
+  # `parent_controller` and defaulting to ActionController::Base.
+  #
+  # They are separate because the two controllers have opposite needs. The MCP
+  # transport is a JSON-only endpoint, so a host quite reasonably points
+  # `parent_controller` at `ActionController::API` — which cannot render an HTML
+  # view. The bridge's authorization page IS an HTML view. Deriving it from
+  # `parent_controller` would therefore force a host to weaken its transport's
+  # superclass just to switch the bridge on; keeping them apart means enabling
+  # the bridge changes nothing about the transport.
+  #
+  # Point this at your own `ApplicationController` to inherit app branding (the
+  # page renders with `layout: false` regardless, so an app layout that needs
+  # asset-pipeline context is not pulled in).
+  #
+  # @return [String]
+  attr_accessor :oauth_parent_controller
+
   # --- caching ---------------------------------------------------------------
 
   # The cache store backing sessions and introspection results. Must satisfy the
@@ -474,9 +492,7 @@ class McpToolkit::Configuration
 
     @token_authenticator = nil
 
-    @oauth_allowed_redirect_uris = []
-    @oauth_resource_path = "/mcp"
-    @oauth_authorization_code_ttl = 60
+    initialize_oauth_bridge_defaults
 
     @cache_store = ActiveSupport::Cache::MemoryStore.new
     initialize_data_path_defaults
@@ -496,6 +512,15 @@ class McpToolkit::Configuration
 
     @registry = McpToolkit::Registry.new
     @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
+  end
+
+  # OAuth bridge defaults. The empty redirect allowlist is what keeps the bridge
+  # OFF (`oauth_bridge?`), so a host that never configures it is unaffected.
+  def initialize_oauth_bridge_defaults
+    @oauth_allowed_redirect_uris = []
+    @oauth_resource_path = "/mcp"
+    @oauth_authorization_code_ttl = 60
+    @oauth_parent_controller = "ActionController::Base"
   end
 
   # Session-TTL and list-executor defaults: the :tokenized / :created_at
