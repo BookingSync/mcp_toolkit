@@ -259,6 +259,9 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
       before do
         McpToolkit.config.auth_role = :authority
         McpToolkit.config.oauth_allowed_redirect_uris = ["https://client.example/callback"]
+        # Rejects every token — the caller in these examples is unauthenticated —
+        # but its PRESENCE is part of what makes the bridge configured at all.
+        McpToolkit.config.token_authenticator = ->(_plaintext) { nil }
       end
 
       # Path-scoped: stating the location outright is also what keeps a client from
@@ -269,6 +272,17 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
         expect(controller.response.headers["WWW-Authenticate"]).to eq(
           %(Bearer resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource/mcp")
         )
+      end
+
+      # `base_url` honours X-Forwarded-Host, so it is caller-influenced: a quote
+      # in it would close the quoted-string and let a caller append auth-params of
+      # their own. A URL cannot legitimately contain one, so the challenge is
+      # withheld rather than emitted broken.
+      it "emits no challenge at all when the request origin contains a quote" do
+        controller.request.base_url = 'https://evil.example"; x="y'
+        controller.send(:mcp_authenticate!)
+
+        expect(controller.response.headers).not_to have_key("WWW-Authenticate")
       end
     end
 

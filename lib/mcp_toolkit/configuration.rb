@@ -123,18 +123,51 @@ class McpToolkit::Configuration
   # McpToolkit::Oauth::ControllerMethods.
 
   # The exact redirect URIs an authorization code may be handed to — the
-  # allowlist a client's `redirect_uri` is matched against by exact string. This
-  # is the bridge's load-bearing control: without it the authorize endpoint would
-  # be an open redirect that emits authorization codes.
+  # allowlist a REMOTE client's `redirect_uri` is matched against by exact
+  # string. This is the bridge's load-bearing control: without it the authorize
+  # endpoint would be an open redirect that emits authorization codes.
   #
-  # EMPTY BY DEFAULT, and an empty list DISABLES the bridge entirely (see
-  # `oauth_bridge?`) — so it cannot be switched on without naming who may receive
-  # a code, and a host that wants nothing to do with it sets nothing.
+  # Why it cannot just be opened up to "any client": the page is served from the
+  # host's OWN origin under its own certificate and asks for a live token, so an
+  # unvetted `redirect_uri` makes it a credential-phishing page hosted by the host
+  # itself — an attacker sends the operator an authorize link carrying the
+  # attacker's `code_challenge`, the operator pastes, and the code goes to the
+  # attacker, who redeems it with the verifier they chose. PKCE cannot help; they
+  # own the verifier. A real authorization server blocks this with a consent
+  # screen naming the client plus an authenticated session. This bridge mocks both
+  # away, and this allowlist is what compensates.
+  #
+  # EMPTY BY DEFAULT. Empty, and with `oauth_allow_native_client_redirects` off,
+  # the bridge is DISABLED entirely (see `oauth_bridge?`) — so it cannot be
+  # switched on without naming who may receive a code, and a host that wants
+  # nothing to do with it sets nothing.
   #
   #   c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
   #
   # @return [Array<String>]
   attr_accessor :oauth_allowed_redirect_uris
+
+  # Permits NATIVE-client targets generically, without naming each one: loopback
+  # on any port (RFC 8252 §7.3 — the port is ephemeral, so it could not be named
+  # ahead of time) and private-use schemes (§7.1), i.e. `http://127.0.0.1:54321/cb`,
+  # `http://localhost:*/cb`, `cursor://…`.
+  #
+  # Safe to open generically for the same reason the allowlist above cannot be:
+  # these deliver the code to the OPERATOR'S OWN DEVICE, and the phishing above
+  # needs it to reach a REMOTE attacker. (The residual risk is a malicious app
+  # already installed on that machine squatting the scheme — local code execution,
+  # a lost game regardless. RFC 8252 lets native apps skip pre-registration on
+  # this same reasoning.) A remote `https://` callback is never covered by this,
+  # whatever it is set to.
+  #
+  # OFF BY DEFAULT: switching it on says "any MCP client on my operators' machines
+  # may receive a code", which is a decision, not a default — and so is an opt-in
+  # signal in its own right.
+  #
+  #   c.oauth_allow_native_client_redirects = true
+  #
+  # @return [Boolean]
+  attr_accessor :oauth_allow_native_client_redirects
 
   # The path McpToolkit::Engine is mounted at, used to build the `resource`
   # identifier, the issuer, the two metadata locations, and the bridge's own
@@ -518,10 +551,12 @@ class McpToolkit::Configuration
     @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
   end
 
-  # OAuth bridge defaults. The empty redirect allowlist is what keeps the bridge
-  # OFF (`oauth_bridge?`), so a host that never configures it is unaffected.
+  # OAuth bridge defaults. The empty redirect allowlist AND the off native-client
+  # switch are jointly what keep the bridge OFF (`oauth_bridge?`), so a host that
+  # never configures it is unaffected.
   def initialize_oauth_bridge_defaults
     @oauth_allowed_redirect_uris = []
+    @oauth_allow_native_client_redirects = false
     @oauth_resource_path = "/mcp"
     @oauth_authorization_code_ttl = 60
     @oauth_parent_controller = "ActionController::Base"
@@ -676,16 +711,30 @@ class McpToolkit::Configuration
   # Whether the OAuth authorization bridge is live: its routes are drawn, and the
   # authority transport advertises it on a 401 via `WWW-Authenticate`.
   #
-  # Gated on BOTH conditions, each for its own reason. It is AUTHORITY-ONLY
-  # because the flow hands back a token this app itself authenticates — a
-  # satellite's tokens belong to its central app, so there is nothing here for it
-  # to authorize against. And it requires a non-empty
-  # `oauth_allowed_redirect_uris`, so the bridge cannot be running without an
-  # allowlist to bound where codes may go.
+  # Gated on three conditions, each for its own reason.
+  #
+  # AUTHORITY-ONLY, because the flow hands back a token this app itself
+  # authenticates — a satellite's tokens belong to its central app, so there is
+  # nothing here for it to authorize against.
+  #
+  # A `token_authenticator` must be set, because the bridge cannot function
+  # without one: it verifies the pasted token through it on both legs. Gated
+  # rather than left to fail at request time so a misconfigured host serves no
+  # bridge at all, instead of an authorization page that accepts an operator's
+  # token and then errors — the sibling introspection endpoint fails safe the
+  # same way.
+  #
+  # And at least one redirect target must be named — an allowlist entry, or the
+  # native-client switch — so the bridge cannot be running without a bound
+  # answer to "who may receive a code". Both are empty/off by default, which is
+  # what makes an unconfigured host byte-identical to one without the bridge.
   #
   # @return [Boolean]
   def oauth_bridge?
-    authority? && Array(oauth_allowed_redirect_uris).any?
+    return false unless authority?
+    return false if token_authenticator.nil?
+
+    Array(oauth_allowed_redirect_uris).any? || !!oauth_allow_native_client_redirects
   end
 
   # Full introspection URL the satellite POSTs to. Raises a clear error if the

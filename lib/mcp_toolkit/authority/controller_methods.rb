@@ -400,10 +400,18 @@ module McpToolkit::Authority::ControllerMethods
   # path-scoped location is found without probing the origin's bare well-known
   # path. Emitted only when the bridge is configured, so a host that has not opted
   # in keeps its 401 byte-identical.
+  #
+  # `request.base_url` honours `X-Forwarded-Host`, so it is caller-influenced and
+  # cannot be interpolated into a quoted-string parameter unescaped: a host
+  # carrying a `"` would close the quotes and let a caller append auth-params of
+  # their own. A URL has no business containing one, so refuse rather than escape
+  # — an origin that odd is a misconfiguration to notice, not to render.
   def mcp_set_authenticate_challenge
     return unless mcp_config.oauth_bridge?
 
     metadata_url = "#{request.base_url}#{mcp_config.oauth_protected_resource_path}"
+    return if metadata_url.include?('"')
+
     response.headers["WWW-Authenticate"] = %(Bearer resource_metadata="#{metadata_url}")
   end
 

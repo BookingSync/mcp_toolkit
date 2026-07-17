@@ -103,10 +103,16 @@ RSpec.describe "Mountable engine + gem controller" do
     # The OAuth bridge is off until a host names who may receive an authorization
     # code, so it stays out of the default endpoint set.
     let(:oauth_redirect_uris) { [] }
+    let(:oauth_allow_native) { false }
+    # The bridge also needs the authenticator it verifies a pasted token with; an
+    # authority always has one. Its own gate is asserted below.
+    let(:token_authenticator) { ->(_plaintext) { nil } }
 
     before do
       McpToolkit.config.auth_role = auth_role
       McpToolkit.config.oauth_allowed_redirect_uris = oauth_redirect_uris
+      McpToolkit.config.oauth_allow_native_client_redirects = oauth_allow_native
+      McpToolkit.config.token_authenticator = token_authenticator
       recorder = route_recorder
       stub_const("Rails", Module.new)
       # The engine class body now also calls `config.to_prepare { ... }` (lazy
@@ -167,6 +173,31 @@ RSpec.describe "Mountable engine + gem controller" do
 
       it "draws the bridge's endpoints" do
         expect(route_recorder.drawn).to include(*oauth_routes)
+      end
+    end
+
+    # Allowing native clients names who may receive a code just as an allowlist
+    # entry does ("anything on my operators' machines"), so it is an opt-in in its
+    # own right — a host serving only desktop MCP clients needs no allowlist.
+    context "when an authority allows native clients but names no allowlist" do
+      let(:oauth_allow_native) { true }
+
+      it "draws the bridge's endpoints" do
+        expect(route_recorder.drawn).to include(*oauth_routes)
+      end
+    end
+
+    # The bridge verifies the pasted token through the authenticator on both legs,
+    # so without one it cannot work. Drawing no route at all beats an authorization
+    # page that takes an operator's token and then errors.
+    context "when an authority named a redirect target but configured no token_authenticator" do
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+      let(:token_authenticator) { nil }
+
+      # Still an authority, so its introspection route is unaffected — it is only
+      # the bridge that goes away.
+      it "still draws no OAuth bridge" do
+        expect(route_recorder.drawn).not_to include(*oauth_routes)
       end
     end
 

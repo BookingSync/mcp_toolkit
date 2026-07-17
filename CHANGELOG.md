@@ -21,11 +21,28 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   lifetime, so a client re-runs the flow rather than refreshing a shadow of it).
 
   Deliberately NOT mocked, because faking either would create a real vulnerability
-  rather than skip a ceremony: `redirect_uri` is matched against
-  `config.oauth_allowed_redirect_uris` by exact string on BOTH legs (an unvetted
-  redirect target would be an open redirect that emits authorization codes), and
-  the PKCE `code_verifier` is verified (constant-time) against the stored S256
-  `code_challenge`.
+  rather than skip a ceremony: `redirect_uri` is checked against the host's policy
+  on BOTH legs (below), and the PKCE `code_verifier` is verified (constant-time)
+  against the stored S256 `code_challenge`.
+
+  **Which clients may receive a code.** The authorization page is served from the
+  host's own origin, under its own certificate, and asks an operator to paste a
+  live token — so an unvetted `redirect_uri` does not merely add an open redirect,
+  it makes the host's own domain a credential-phishing page: an attacker sends the
+  operator an authorize link carrying the attacker's own `code_challenge`, the
+  operator pastes, and the code is delivered to the attacker, who redeems it with
+  the verifier they chose. PKCE cannot help — they own the verifier. That attack
+  needs the code to reach a REMOTE attacker, which is what splits the policy in
+  two: a remote callback is matched by exact string against
+  `config.oauth_allowed_redirect_uris` and is never opened up, while RFC 8252
+  native targets — loopback on any port (§7.3, the port is ephemeral and cannot be
+  registered ahead of time) and private-use schemes (§7.1) — are permitted
+  generically by `config.oauth_allow_native_client_redirects`, because they deliver
+  the code to the operator's OWN machine. So every MCP client running on an
+  operator's machine works with no configuration, while a hosted client needs one
+  allowlist entry. Native targets are judged on the PARSED URI
+  (`http://127.0.0.1@evil.example/` has host `evil.example`, and is remote), and a
+  fragment, an opaque URI, or a `javascript:`/`data:`/`file:` scheme is refused.
 
   Endpoints — `GET`/`POST` `<mcp>/oauth/authorize`, `POST <mcp>/oauth/token`,
   `POST <mcp>/oauth/register`, plus the two metadata documents. A `/.well-known/*`
@@ -49,13 +66,24 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   the path-INSERTED URLs with no root fallback — so the issuer is the MCP endpoint
   URL itself. A host mounted AT its origin root has no path to insert and gets the
   bare paths, which is correct there.
-- `config.oauth_allowed_redirect_uris` (default `[]`), `config.oauth_resource_path`
-  (default `"/mcp"` — must match the engine's mount point),
-  `config.oauth_authorization_code_ttl` (default `60`), and
+- `config.oauth_allowed_redirect_uris` (default `[]`),
+  `config.oauth_allow_native_client_redirects` (default `false`),
+  `config.oauth_resource_path` (default `"/mcp"` — must match the engine's mount
+  point), `config.oauth_authorization_code_ttl` (default `60`), and
   `config.oauth_parent_controller` (default `"ActionController::Base"`).
-- `config.oauth_bridge?` — whether the bridge is live. Gated on the authority role
-  AND a non-empty redirect allowlist, so it cannot run without bounds on where codes
-  may go, and a satellite (whose tokens belong to its central app) never draws it.
+- `config.oauth_bridge?` — whether the bridge is live. Gated on the authority role;
+  on a `token_authenticator` being set, since the bridge verifies the pasted token
+  through it on both legs and drawing no route beats an authorization page that
+  takes an operator's token and then errors; and on at least one redirect target
+  being named (an allowlist entry or the native-client switch), so it cannot run
+  without a bound answer to who may receive a code. A satellite — whose tokens
+  belong to its central app — never draws it.
+- Both metadata documents are served `Cache-Control: no-store`. They name the
+  `authorization_endpoint` an operator will be sent to and are built from the
+  caller-influenced request origin (`request.base_url` honours `X-Forwarded-Host`),
+  so a shared cache holding one could hand every client an origin an attacker
+  chose, with the document itself vouching for it. Hosts should also pin
+  `config.hosts`, which Rails leaves empty in production by default.
 - The authority transport's 401 now carries
   `WWW-Authenticate: Bearer resource_metadata="..."` when the bridge is configured —
   the header a hosted client waits for before it will start a flow at all. Absent
@@ -63,6 +91,16 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
 
 ### Notes
 
+- **An authorization code leaves nothing usable in the cache.** The entry is keyed
+  by the code's SHA256 and its payload is sealed with `MessageEncryptor` under a
+  key derived from the code, which never itself lands in the store — so a dump of
+  it (a Redis snapshot, a FileStore on disk) yields ciphertext with no key, and a
+  payload swapped in a writable cache does not decrypt. Worth the few lines because
+  what is parked there for the code's lifetime is not the short-lived credential an
+  authorization server would normally hold: it is the operator's pre-existing,
+  long-lived, full-scope token, and `cache_store` is documented to be the host's
+  shared `Rails.cache`. Codes are also single-use by the DELETE rather than the
+  read, so of two concurrent redemptions exactly one proceeds.
 - The bridge's controller is built from its own `config.oauth_parent_controller`
   rather than the `parent_controller` the transport uses. The transport is a
   JSON-only endpoint whose parent is typically `ActionController::API`, which
@@ -70,6 +108,9 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   separate means enabling the bridge changes nothing about the transport. Point
   `oauth_parent_controller` at your own `ApplicationController` to inherit app
   branding; the page renders with `layout: false` either way.
+- If a host logs request parameters, add `code_verifier` to
+  `config.filter_parameters`; `access_token` is already covered by the stock
+  `token` entry Rails ships.
 - A host restyles the page by defining its own
   `app/views/mcp_toolkit/oauth/authorize.html.erb`, which takes precedence over the
   engine's.

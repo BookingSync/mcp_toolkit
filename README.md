@@ -428,6 +428,11 @@ McpToolkit.configure do |c|
   # Naming who may receive an authorization code is what switches the bridge on.
   c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
   c.oauth_resource_path = "/mcp" # must match the engine's mount point
+
+  # Optional: let any MCP client running on your operators' OWN machines connect
+  # without an allowlist entry each (RFC 8252 — see below). This is an opt-in
+  # signal in its own right, so it alone can switch the bridge on.
+  c.oauth_allow_native_client_redirects = true
 end
 ```
 
@@ -456,10 +461,50 @@ no refresh token is issued (the pasted token's own expiry is the real lifetime, 
 a client re-runs the flow instead of refreshing a shadow of it).
 
 **What is not faked**, because faking either would be a real vulnerability rather
-than a skipped ceremony: `redirect_uri` is matched against
-`oauth_allowed_redirect_uris` by exact string on both legs — an unvetted redirect
-target would be an open redirect that emits authorization codes — and the PKCE
-`code_verifier` is verified against the stored S256 challenge.
+than a skipped ceremony: `redirect_uri` is checked against your policy on both
+legs (below), and the PKCE `code_verifier` is verified against the stored S256
+challenge in constant time.
+
+### Which clients may receive a code
+
+This is the bridge's load-bearing control, so it is worth knowing why it is shaped
+the way it is. The authorization page is served from **your** origin under **your**
+certificate and asks an operator to paste a live token. So an unvetted
+`redirect_uri` does not merely add an open redirect — it makes your own domain a
+credential-phishing page: an attacker sends the operator an authorize link
+carrying the attacker's own `code_challenge`, the operator pastes, the code is
+delivered to the attacker, and they redeem it with the verifier they chose. PKCE
+does not help (they own the verifier), nor does the single-use code, nor
+re-verifying the token. A full authorization server blocks this with a consent
+screen naming the client plus an authenticated session; this bridge mocks both
+away, which is exactly what the redirect policy compensates for.
+
+That threat needs the code to reach a **remote** attacker, which is what splits
+the policy in two:
+
+| Target | Rule | Why |
+|---|---|---|
+| Remote (`https://client.example/cb`) | Exact string, in `oauth_allowed_redirect_uris` | The phishing vector. Never opened up. |
+| Loopback (`http://127.0.0.1:*`, `localhost`, `[::1]`) | Allowed by `oauth_allow_native_client_redirects` | RFC 8252 §7.3. The code lands on the operator's own machine; the port is ephemeral and cannot be registered ahead of time. |
+| Private-use scheme (`cursor://…`, `com.example.app:/cb`) | Allowed by `oauth_allow_native_client_redirects` | RFC 8252 §7.1. Handed to a locally registered app; the code never leaves the device. |
+
+So **every MCP client on your operators' machines works with no configuration**,
+while a hosted client needs one allowlist entry. Native targets are judged on the
+*parsed* URI — `http://127.0.0.1@evil.example/` (host `evil.example`) and
+`http://127.0.0.1.evil.example/` are both correctly seen as remote — and a
+fragment, an opaque URI, or a `javascript:`/`data:`/`file:` scheme is refused
+outright.
+
+### Deployment note
+
+Every identifier the bridge publishes is derived from the live request origin
+(`request.base_url`), which honours `X-Forwarded-Host`. **Pin `config.hosts`** so
+Rails' `HostAuthorization` rejects a forged header before it reaches the bridge;
+Rails leaves it empty in production by default. Both metadata documents are served
+`Cache-Control: no-store` regardless, so no shared cache can hand one client an
+origin another client chose. If you log request parameters, add `code_verifier` to
+`config.filter_parameters` (`access_token` is already covered by the stock `token`
+entry).
 
 **It is additive to an OAuth provider you already run, and it claims nothing
 origin-global.** The flow endpoints live under the engine's mount
@@ -481,10 +526,13 @@ If your MCP endpoint IS its origin root (a dedicated MCP domain), there is no pa
 to insert and you get the bare paths — correct there, since your server really is
 that origin's only authorization server. Set `oauth_resource_path = "/"`.
 
-`oauth_allowed_redirect_uris` is empty by default, which leaves
-`config.oauth_bridge?` false and the routes undrawn — the bridge cannot run without
-bounds on where codes may go, and a satellite never draws it at all (its tokens
-belong to its central app, so there is nothing for it to authorize against).
+`oauth_allowed_redirect_uris` is empty and `oauth_allow_native_client_redirects`
+is off by default, which leaves `config.oauth_bridge?` false and the routes
+undrawn — the bridge cannot run without bounds on where codes may go. A satellite
+never draws it at all (its tokens belong to its central app, so there is nothing
+for it to authorize against), and neither does an authority with no
+`token_authenticator`, since the bridge verifies the pasted token through it on
+both legs and could not work without one.
 
 The bridge's controller has its **own** parent, `config.oauth_parent_controller`
 (default `ActionController::Base`), deliberately separate from the

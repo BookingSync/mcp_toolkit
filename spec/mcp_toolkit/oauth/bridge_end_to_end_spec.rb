@@ -140,10 +140,12 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     session.get("/.well-known/oauth-protected-resource/mcp")
     result["prm_status"] = session.last_response.status
     result["prm"] = JSON.parse(session.last_response.body)
+    result["prm_cache_control"] = session.last_response.headers["Cache-Control"]
 
     session.get("/.well-known/oauth-authorization-server/mcp")
     result["as_status"] = session.last_response.status
     result["as"] = JSON.parse(session.last_response.body)
+    result["as_cache_control"] = session.last_response.headers["Cache-Control"]
 
     # The bare, ORIGIN-GLOBAL well-known paths must stay untouched — they describe
     # the whole origin's authorization server, which on a host already running one
@@ -214,6 +216,33 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     result["replayed_code_status"] = session.last_response.status
     result["replayed_code_body"] = JSON.parse(session.last_response.body)
 
+    # 10. A NATIVE client (RFC 8252), whose ephemeral loopback port no host could
+    # have allowlisted ahead of time. Off until the host opts in, so prove both
+    # states through the real stack rather than trusting the unit's fake host.
+    loopback_uri = "http://127.0.0.1:54321/cb"
+    native_query = authorize_query.merge(redirect_uri: loopback_uri)
+    session.get("/mcp/oauth/authorize", native_query)
+    result["native_authorize_status_when_off"] = session.last_response.status
+
+    McpToolkit.config.oauth_allow_native_client_redirects = true
+    session.get("/mcp/oauth/authorize", native_query)
+    result["native_authorize_status_when_on"] = session.last_response.status
+
+    session.post("/mcp/oauth/authorize", native_query.merge(access_token: VALID_TOKEN))
+    native_location = session.last_response.headers["Location"]
+    result["native_location_prefix"] = native_location && native_location.split("?").first
+    native_code = native_location && Rack::Utils.parse_query(URI.parse(native_location).query)["code"]
+
+    session.post("/mcp/oauth/token", {
+      grant_type: "authorization_code", code: native_code, redirect_uri: loopback_uri, code_verifier: verifier
+    })
+    result["native_token_is_the_pasted_token"] = JSON.parse(session.last_response.body)["access_token"] == VALID_TOKEN
+
+    # Opting native clients in must not turn the remote allowlist into a
+    # suggestion — this is the phishing target, and it stays named-only.
+    session.get("/mcp/oauth/authorize", authorize_query.merge(redirect_uri: "https://attacker.example/x"))
+    result["remote_unregistered_status_with_native_on"] = session.last_response.status
+
     puts JSON.generate(result)
   RUBY
 
@@ -250,6 +279,37 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
         "/", "/", "/", "/health", "/tokens/introspect",
         "/oauth/authorize", "/oauth/authorize", "/oauth/token", "/oauth/register"
       )
+    end
+  end
+
+  # Both documents name the authorization_endpoint an operator is sent to, and
+  # both are built from the caller-influenced request origin — so a shared cache
+  # holding one on another client's behalf is a token-theft primitive. Asserted
+  # through real Rails because Rails writes its own Cache-Control on commit, and
+  # a fake controller could only ever confirm the fake.
+  describe "metadata cacheability" do
+    it "forbids a shared cache from storing either document" do
+      expect(@result.fetch("prm_cache_control")).to eq("no-store")
+      expect(@result.fetch("as_cache_control")).to eq("no-store")
+    end
+  end
+
+  # RFC 8252 native clients: the ephemeral loopback port cannot be registered
+  # ahead of time, and it does not need to be — the code goes to the operator's
+  # own machine, where the phishing the allowlist stops cannot reach.
+  describe "native (RFC 8252) clients" do
+    it "refuses loopback until the host opts in" do
+      expect(@result.fetch("native_authorize_status_when_off")).to eq(400)
+    end
+
+    it "runs a loopback client through the whole flow once opted in" do
+      expect(@result.fetch("native_authorize_status_when_on")).to eq(200)
+      expect(@result.fetch("native_location_prefix")).to eq("http://127.0.0.1:54321/cb")
+      expect(@result.fetch("native_token_is_the_pasted_token")).to be(true)
+    end
+
+    it "keeps a remote callback allowlist-only even with native clients allowed" do
+      expect(@result.fetch("remote_unregistered_status_with_native_on")).to eq(400)
     end
   end
 

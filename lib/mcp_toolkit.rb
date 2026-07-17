@@ -15,7 +15,8 @@ require "zeitwerk"
 #   mcp           - the official MCP SDK (Server wraps it; Tools::Base subclasses MCP::Tool)
 #   active_support/concern - Transport::ControllerMethods is an includable concern
 #   active_support/cache   - the default MemoryStore cache_store
-#   active_support/security_utils - constant-time compare (OAuth bridge PKCE)
+#   active_support/security_utils    - constant-time compare (OAuth bridge PKCE)
+#   active_support/message_encryptor - encrypts the OAuth bridge's cached code payload
 #
 # Two third-party libs are the exception to the centralize-here rule: each is
 # required alongside its owner file rather than up front.
@@ -32,6 +33,7 @@ require "mcp"
 require "active_support/concern"
 require "active_support/cache"
 require "active_support/security_utils"
+require "active_support/message_encryptor"
 
 # External dependencies (NOT autoloaded by Zeitwerk — only the gem's own tree is).
 # ActiveSupport's specific core extensions are required up front (rather than full

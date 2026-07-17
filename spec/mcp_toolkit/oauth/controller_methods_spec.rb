@@ -22,6 +22,10 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
         @request ||= Struct.new(:base_url).new("https://mcp.example.test")
       end
 
+      def response
+        @response ||= Struct.new(:headers).new({})
+      end
+
       def render(*args, **options)
         @rendered = { template: args.first, options: }
       end
@@ -42,6 +46,11 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   let(:code_verifier) { "a-high-entropy-code-verifier-string" }
   let(:code_challenge) do
     [Digest::SHA256.digest(code_verifier)].pack("m0").tr("+/", "-_").delete("=")
+  end
+
+  # What a client posts to the token endpoint, minus the code it just received.
+  let(:exchange_params) do
+    { grant_type: "authorization_code", redirect_uri:, code_verifier: }
   end
 
   before do
@@ -216,6 +225,82 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
     end
   end
 
+  # RFC 8252 native clients. These need no allowlist entry because the code is
+  # delivered to the operator's OWN machine, which is what makes them a different
+  # kind of target rather than a laxer rule — the phishing the allowlist exists to
+  # stop needs the code to reach a REMOTE attacker.
+  describe "native-client redirect targets" do
+    def authorize_with(uri)
+      controller.params = authorize_params(redirect_uri: uri)
+      controller.authorize
+      controller.rendered
+    end
+
+    context "when the host has not opted in" do
+      it "refuses loopback like any other unnamed target" do
+        expect(authorize_with("http://127.0.0.1:54321/cb")[:options]).to include(status: :bad_request)
+      end
+    end
+
+    context "when the host allows native clients" do
+      before { McpToolkit.config.oauth_allow_native_client_redirects = true }
+
+      # The port is ephemeral, so it cannot be registered ahead of time — which is
+      # the entire reason RFC 8252 §7.3 exists.
+      it "accepts loopback on an arbitrary port" do
+        expect(authorize_with("http://127.0.0.1:54321/cb")[:template]).to eq(:authorize)
+      end
+
+      it "accepts the loopback name and the IPv6 literal clients really send" do
+        expect(authorize_with("http://localhost:3000/cb")[:template]).to eq(:authorize)
+        expect(authorize_with("http://[::1]:8080/cb")[:template]).to eq(:authorize)
+      end
+
+      it "accepts a private-use scheme (§7.1), as a desktop MCP client registers" do
+        expect(authorize_with("cursor://anysphere.cursor-retrieval/oauth/callback")[:template]).to eq(:authorize)
+        expect(authorize_with("com.example.app:/oauth2redirect")[:template]).to eq(:authorize)
+      end
+
+      # The switch says "any client on my operators' MACHINES", never "any client".
+      # A remote callback is the phishing vector and stays allowlist-only.
+      it "still refuses a remote https callback that was never named" do
+        expect(authorize_with("https://attacker.example/steal")[:options]).to include(status: :bad_request)
+      end
+
+      # Everything below is remote wearing a loopback costume. Each is checked
+      # against the PARSED host, which is what a browser actually resolves.
+      it "refuses a host that merely embeds a loopback address" do
+        # userinfo: the host is evil.example
+        expect(authorize_with("http://127.0.0.1@evil.example/cb")[:options]).to include(status: :bad_request)
+        # a subdomain of the attacker's domain
+        expect(authorize_with("http://127.0.0.1.evil.example/cb")[:options]).to include(status: :bad_request)
+        # loopback hidden in a fragment
+        expect(authorize_with("http://evil.example/cb#@127.0.0.1/")[:options]).to include(status: :bad_request)
+      end
+
+      it "refuses a scheme-relative uri, which names no scheme to judge" do
+        expect(authorize_with("//evil.example/cb")[:options]).to include(status: :bad_request)
+      end
+
+      it "refuses pseudo-schemes a browser may treat as script or local content" do
+        ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "blob:https://evil.example/x"]
+          .each { |uri| expect(authorize_with(uri)[:options]).to include(status: :bad_request) }
+      end
+
+      it "refuses a redirect_uri carrying a fragment, which OAuth forbids" do
+        expect(authorize_with("http://127.0.0.1:5/cb#frag")[:options]).to include(status: :bad_request)
+      end
+
+      it "hands a code to a native client through the full flow" do
+        native_uri = "http://127.0.0.1:54321/cb"
+        controller.params = authorize_params(redirect_uri: native_uri).merge(access_token: valid_token)
+        controller.approve
+
+        expect(controller.redirected_to[:url]).to start_with("#{native_uri}?code=")
+      end
+    end
+  end
+
   describe "#approve" do
     it "redirects to the client with a code and the echoed state" do
       controller.params = authorize_params.merge(access_token: valid_token)
@@ -270,10 +355,6 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   end
 
   describe "#token" do
-    let(:exchange_params) do
-      { grant_type: "authorization_code", redirect_uri:, code_verifier: }
-    end
-
     it "hands back the pasted token itself" do
       code = issue_code
       controller.params = exchange_params.merge(code:)
@@ -340,13 +421,81 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
     end
 
+    # Expiry is simulated by emptying the store rather than deleting a
+    # hand-built key: the key derivation is the bridge's own business, and a spec
+    # that restates it passes just as happily when it is wrong.
     it "lets an expired code lapse" do
       code = issue_code
-      McpToolkit.config.cache_store.delete("#{described_class::CODE_CACHE_PREFIX}#{code}")
+      McpToolkit.config.cache_store.clear
       controller.params = exchange_params.merge(code:)
       controller.token
 
       expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
+    end
+  end
+
+  # `cache_store` is documented to be the host's shared Rails.cache, and what is
+  # parked in it is the operator's own long-lived token — so what a dump of that
+  # store would yield is a property worth pinning, not an implementation detail.
+  describe "what the code leaves in the cache" do
+    # Reaches into the store deliberately: the claim is about the bytes a snapshot
+    # of it would contain, so it has to be asserted against the stored entries
+    # themselves — `Entry#value` and not `Entry#to_s`, which shows an object id and
+    # would let this pass while the token sat there in the clear.
+    def cached_keys
+      McpToolkit.config.cache_store.instance_variable_get(:@data).keys
+    end
+
+    def cached_values
+      McpToolkit.config.cache_store.instance_variable_get(:@data).values.map { |entry| entry.value.to_s }
+    end
+
+    # Guards the guard: if the payload were NOT sealed, this is the assertion that
+    # has to fail, so prove the plaintext would be visible to it.
+    it "would see a plaintext token in the store (so the assertion below means something)" do
+      McpToolkit.config.cache_store.write("probe", { access_token: valid_token }.to_json, expires_in: 60)
+
+      expect(cached_values.join).to include(valid_token)
+    end
+
+    it "parks neither the token nor the code itself" do
+      code = issue_code
+
+      expect(cached_keys.join).not_to include(code)
+      expect(cached_values.join).not_to include(valid_token)
+    end
+
+    it "still round-trips the token to the client holding the code" do
+      code = issue_code
+      controller.params = exchange_params.merge(code:)
+      controller.token
+
+      expect(controller.rendered[:options][:json]).to eq(access_token: valid_token, token_type: "Bearer")
+    end
+
+    # Sealed as well as hidden: a payload swapped in the store does not decrypt,
+    # so a writable cache cannot be used to inject a token of the attacker's
+    # choosing into the exchange.
+    it "refuses a payload that was tampered with in the store" do
+      code = issue_code
+      McpToolkit.config.cache_store.write(cached_keys.first, "tampered-ciphertext", expires_in: 60)
+      controller.params = exchange_params.merge(code:)
+      controller.token
+
+      expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
+    end
+  end
+
+  # A metadata document names the authorization_endpoint an operator will be sent
+  # to, and it is built from the caller-influenced request origin — so it is
+  # precisely the thing a shared cache must not hold on another client's behalf.
+  describe "metadata caching" do
+    it "forbids storing either document" do
+      controller.protected_resource
+      expect(controller.response.headers["Cache-Control"]).to eq("no-store")
+
+      controller.authorization_server
+      expect(controller.response.headers["Cache-Control"]).to eq("no-store")
     end
   end
 end
