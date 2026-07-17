@@ -403,6 +403,180 @@ mount McpToolkit::Engine => "/mcp"   # POST /mcp/tokens/introspect now works
 Drawing it is safe even on an app that is not an authority: with no
 `token_authenticator`, it simply answers `{ "valid": false }`.
 
+### OAuth authorization bridge (authority-only, opt-in)
+
+Some MCP clients will not accept a token you hand them. They authenticate one way
+only: discover an authorization server, run an authorization-code + PKCE flow in a
+browser, and use whatever `access_token` comes back. The MCP authorization spec
+also forbids a token in the request URI, so `?token=<...>` is not a fallback for
+them either. If your tokens are issued out-of-band — an admin UI, a CLI, a support
+process — those clients cannot reach your server at all.
+
+The bridge is a standards-shaped **envelope around the tokens you already issue**.
+It is not an identity provider: its authorization page asks the operator to paste
+an access token they already hold, and the `access_token` it returns **is that
+token**, verified through the same `token_authenticator` your transport uses.
+Scopes, expiry, revocation and tenancy stay exactly where you put them, and it
+creates no new way to obtain a token.
+
+```ruby
+# config/initializers/mcp_toolkit.rb
+McpToolkit.configure do |c|
+  c.auth_role = :authority
+  c.token_authenticator = ->(plaintext) { AccessToken.authenticate(plaintext) }
+
+  # REQUIRED for the bridge on any multi-worker deployment. The default is an
+  # in-process MemoryStore, which cannot carry an authorization code from the
+  # worker that issues it to the worker that redeems it — the flow then fails
+  # intermittently, *after* the operator has pasted their token.
+  c.cache_store = Rails.cache
+
+  # Naming who may receive an authorization code is what switches the bridge on.
+  c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
+  c.oauth_resource_path = "/mcp" # must match the engine's mount point
+
+  # Optional: let any MCP client running on your operators' OWN machines connect
+  # without an allowlist entry each (RFC 8252 — see below). This is an opt-in
+  # signal in its own right, so it alone can switch the bridge on.
+  c.oauth_allow_loopback_redirects = true
+end
+```
+
+```ruby
+# config/routes.rb — the helper call must be TOP LEVEL. A `/.well-known/*` path
+# cannot be drawn by an engine mounted under a path, so the metadata routes have
+# to live in your own route set. A no-op unless the bridge is configured.
+Rails.application.routes.draw do
+  McpToolkit.draw_oauth_metadata_routes(self)
+  mount McpToolkit::Engine => "/mcp"
+end
+```
+
+That yields the whole flow — `GET /.well-known/oauth-protected-resource/mcp`,
+`GET /.well-known/oauth-authorization-server/mcp`, `POST /mcp/oauth/register`,
+`GET`/`POST /mcp/oauth/authorize`, `POST /mcp/oauth/token` — plus a
+`WWW-Authenticate: Bearer resource_metadata="..."` header on the transport's 401,
+which is what makes a client start the flow at all. Every identifier is derived
+from the live request origin, so each host name your app answers on works with no
+further configuration.
+
+**What is deliberately absent**, because none of it gates anything here: client
+registration returns an identifier and stores nothing (no endpoint reads a
+`client_id`); there is no consent step (pasting a token you hold *is* the grant);
+no refresh token is issued (the pasted token's own expiry is the real lifetime, so
+a client re-runs the flow instead of refreshing a shadow of it).
+
+**What is not faked**, because faking either would be a real vulnerability rather
+than a skipped ceremony: `redirect_uri` is checked against your policy on both
+legs (below), and the PKCE `code_verifier` is verified against the stored S256
+challenge in constant time.
+
+### Which clients may receive a code
+
+This is the bridge's load-bearing control, so it is worth knowing why it is shaped
+the way it is. The authorization page is served from **your** origin under **your**
+certificate and asks an operator to paste a live token. So an unvetted
+`redirect_uri` does not merely add an open redirect — it makes your own domain a
+credential-phishing page: an attacker sends the operator an authorize link
+carrying the attacker's own `code_challenge`, the operator pastes, the code is
+delivered to the attacker, and they redeem it with the verifier they chose. PKCE
+does not help (they own the verifier), nor does the single-use code, nor
+re-verifying the token. A full authorization server blocks this with a consent
+screen naming the client plus an authenticated session; this bridge mocks both
+away, which is exactly what the redirect policy compensates for.
+
+So **every target must be named by exact string**, with exactly one exception:
+
+| Target | Rule | Why |
+|---|---|---|
+| Anything remote (`https://client.example/cb`) | Exact string, in `oauth_allowed_redirect_uris` | The phishing vector. Never opened up. |
+| Private-use scheme (`cursor://…`, `com.example.app:/cb`) | Exact string, in `oauth_allowed_redirect_uris` | Keeps the code on the device, but its URI is a fixed string — so just name it. |
+| Loopback (`http://127.0.0.1:*`, `localhost`, `[::1]`) | `oauth_allow_loopback_redirects` | The only target that **cannot** be named: the client picks an ephemeral port at runtime (RFC 8252 §7.3). And it resolves on the operator's own machine, so the attack above cannot reach it. |
+
+The loopback exception exists because an allowlist entry is *impossible* there,
+not because native clients are trusted. A private-use scheme keeps the code on the
+device too, but nothing forces it to be unnamed — and whole **schemes** cannot be
+accepted generically anyway: telling a private-use scheme from a registered
+network one (`ssh:`, `ldap:`, `gopher:` — each naming a **remote** host) would
+mean enumerating the IANA registry, and a denylist of the ones you happened to
+think of is the shape that fails open.
+
+Loopback is judged on the *parsed* URI, so `http://127.0.0.1@evil.example/` (host
+`evil.example`) and `http://127.0.0.1.evil.example/` are both correctly seen as
+remote, and a fragment is refused.
+
+**What the allowlist does not cover.** It binds which URL a code may be sent to —
+not *whose session at that URL* receives it. A hosted MCP client is one callback
+shared by every one of its users, so an attacker can start a flow in their own
+account there, send an operator the resulting authorize link, and have the code
+land back at that client carrying the attacker's `state`. Whether the operator's
+token then ends up in the attacker's account is decided by whether **the client**
+binds `state` to the browser session that began the flow (RFC 6819 §4.4.1.7). An
+authorization server cannot bind a code to a session it never saw, so this is not
+something the bridge — or a full authorization server, which has the identical
+exposure — can close. **Only allowlist clients you believe handle `state`
+correctly.**
+
+### Deployment note
+
+Every identifier the bridge publishes is derived from the live request origin
+(`request.base_url`), which honours `X-Forwarded-Host`. **You MUST pin
+`config.hosts`** so Rails' `HostAuthorization` rejects a forged header before it
+reaches the bridge — Rails does *not* do this for you: it populates `config.hosts`
+in development and leaves it **empty in production**, where empty means no
+checking at all. Both metadata documents are served
+`Cache-Control: no-store` regardless, so no shared cache can hand one client an
+origin another client chose.
+
+**Serve it over HTTPS** (`config.force_ssl = true`). The authorization page
+receives a live access token in a POST body; on cleartext that token is on the
+wire. The gem refuses a cleartext remote `redirect_uri` in the allowlist for the
+same reason, but it cannot make your own origin HTTPS for you.
+
+The engine adds `access_token` and `code_verifier` to `config.filter_parameters`
+itself, so the pasted token stays out of your logs even on a host that ships no
+filter list of its own — nothing to configure.
+
+**It is additive to an OAuth provider you already run, and it claims nothing
+origin-global.** The flow endpoints live under the engine's mount
+(`/mcp/oauth/*`), so if you already serve OAuth at the conventional top-level
+`/oauth/*` — as an app with Doorkeeper for its own API does — you keep every one of
+those routes.
+
+The metadata documents are **path-scoped** to the mount
+(`/.well-known/oauth-protected-resource/mcp`), never the bare
+`/.well-known/oauth-authorization-server`. That matters: the bare paths are
+origin-global and mean *"the authorization server of this whole origin"*, which
+belongs to a provider you already run, not to an MCP server sharing the host.
+RFC 8414 §3.1 exists for exactly this — *"Using path components enables supporting
+multiple issuers per host"* — and the MCP authorization spec (2025-11-25) requires
+a client given a path-ful issuer to try the path-**inserted** URLs, with no root
+fallback. So the issuer is your MCP endpoint URL, and both documents hang off it.
+
+If your MCP endpoint IS its origin root (a dedicated MCP domain), there is no path
+to insert and you get the bare paths — correct there, since your server really is
+that origin's only authorization server. Set `oauth_resource_path = "/"`.
+
+`oauth_allowed_redirect_uris` is empty and `oauth_allow_loopback_redirects`
+is off by default, which leaves `config.oauth_bridge?` false and the routes
+undrawn — the bridge cannot run without bounds on where codes may go. A satellite
+never draws it at all (its tokens belong to its central app, so there is nothing
+for it to authorize against), and neither does an authority with no
+`token_authenticator`, since the bridge verifies the pasted token through it on
+both legs and could not work without one.
+
+The bridge's controller has its **own** parent, `config.oauth_parent_controller`
+(default `ActionController::Base`), deliberately separate from the
+`parent_controller` your transport uses. The transport is a JSON-only endpoint you
+may well have pointed at `ActionController::API`, which cannot render an HTML view
+— and the authorization page is one. Keeping them apart means enabling the bridge
+changes nothing about your transport. Point it at your own `ApplicationController`
+to inherit branding; the page renders with `layout: false` either way, so an app
+layout that needs asset-pipeline context is not pulled in.
+
+To restyle the page, define your own `app/views/mcp_toolkit/oauth/authorize.html.erb`
+— your app's view path takes precedence over the engine's.
+
 ## Authority + gateway server (own tools + upstreams, no SDK)
 
 Beyond the SDK-backed satellite path, the toolkit also ships a **hand-rolled

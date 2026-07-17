@@ -28,7 +28,7 @@ module McpToolkit
   # The controllers built directly under McpToolkit (the engine's routes point at
   # these). McpToolkit::Authority::ServerController is built alongside them but is
   # fetched through McpToolkit::Authority's own const_missing.
-  ENGINE_CONTROLLER_NAMES = %i[ServerController TokensController].freeze
+  ENGINE_CONTROLLER_NAMES = %i[ServerController TokensController OauthController].freeze
 
   # (Re)builds the engine controllers + the authority base from the current
   # config. Idempotent: an existing constant is replaced so a rebuild reflects a
@@ -37,6 +37,11 @@ module McpToolkit
     parent = config.parent_controller.constantize
     define_controller(self, :ServerController, build_server_controller(parent))
     define_controller(self, :TokensController, build_tokens_controller(parent))
+    # Only when the bridge is on — matching its routes, which are equally gated.
+    # Its parent (default ActionController::Base) would otherwise be constantized
+    # on every host, pulling view machinery into an API-only app that never
+    # enables the bridge, and breaking a non-Rails host outright.
+    define_controller(self, :OauthController, build_oauth_controller) if config.oauth_bridge?
     define_controller(Authority, :ServerController, build_authority_server_controller(parent))
     ServerController
   end
@@ -44,7 +49,7 @@ module McpToolkit
   # Undefines the built controllers so the next reference rebuilds them from the
   # then-current config. Called from the engine's `to_prepare` on every reload.
   def self.reset_engine_controllers!
-    [[self, :ServerController], [self, :TokensController], [Authority, :ServerController]].each do |mod, name|
+    ENGINE_CONTROLLER_NAMES.map { |name| [self, name] }.push([Authority, :ServerController]).each do |mod, name|
       mod.send(:remove_const, name) if mod.const_defined?(name, false)
     end
   end
@@ -96,10 +101,72 @@ module McpToolkit
     end
   end
 
+  # The OAuth authorization bridge the engine mounts at `<mcp>/oauth/*` and the
+  # host draws at the two `.well-known` metadata paths.
+  #
+  # Built from `config.oauth_parent_controller`, NOT the `parent_controller` its
+  # siblings use: the transport is a JSON-only endpoint that a host rightly points
+  # at ActionController::API, which cannot render an HTML view — and this
+  # controller's authorization page is one. Sharing the parent would force a host
+  # to weaken its transport's superclass just to enable the bridge. Read lazily
+  # here, like the rest, so the host's initializer/to_prepare has already run.
+  def self.build_oauth_controller
+    warn_about_per_process_cache_store
+    Class.new(config.oauth_parent_controller.constantize) { include McpToolkit::Oauth::ControllerMethods }
+  end
+
+  # Said once per boot (this runs from the engine's `to_prepare`), because the
+  # failure it predicts is otherwise hard to read as a misconfiguration at all:
+  # with a per-process cache the two legs of a flow land on different workers, so
+  # the exchange fails (N-1)/N of the time — intermittently, and only AFTER the
+  # operator has already pasted a live token. A warning rather than a gate,
+  # because one process is genuinely fine and `Rails.cache` is a MemoryStore in a
+  # stock development environment.
+  def self.warn_about_per_process_cache_store
+    return unless config.oauth_per_process_cache_store?
+
+    config.logger&.warn(
+      "[mcp_toolkit] The OAuth bridge is enabled but config.cache_store is an in-process MemoryStore. " \
+      "That is safe in a single process only: on a multi-worker deployment an authorization code issued " \
+      "by one worker is invisible to the worker that redeems it, so the flow fails intermittently AFTER " \
+      "the operator has pasted their token. Point config.cache_store at a shared store (Rails.cache " \
+      "backed by Redis/Memcached) before running the bridge in production."
+    )
+  end
+
   # The AUTHORITY base controller a host subclasses (the recommended path for a
   # host whose rate-limit/usage/account hooks touch app models).
   def self.build_authority_server_controller(parent)
     Class.new(parent) { include McpToolkit::Authority::ControllerMethods }
+  end
+
+  # Draws the OAuth bridge's two metadata documents. A `/.well-known/*` path
+  # cannot be drawn by an engine mounted under a path, so it has to live in the
+  # host's own route set. The host calls this at the TOP LEVEL — not inside a
+  # locale/format/constraint scope, which would prefix the paths out of view:
+  #
+  #   # config/routes.rb
+  #   Rails.application.routes.draw do
+  #     McpToolkit.draw_oauth_metadata_routes(self)
+  #     mount McpToolkit::Engine => "/mcp"
+  #     # ...
+  #   end
+  #
+  # The paths are PATH-SCOPED to the engine's mount
+  # (`/.well-known/oauth-protected-resource/mcp`), so this claims NOTHING
+  # origin-global and cannot collide with an OAuth provider the host already runs
+  # — see Configuration#oauth_protected_resource_path for why that matters. A host
+  # mounted at its origin root gets the bare paths instead, which is correct there.
+  #
+  # A no-op unless the bridge is configured, so the call can sit in a host's routes
+  # unconditionally across environments.
+  def self.draw_oauth_metadata_routes(mapper)
+    return unless config.oauth_bridge?
+
+    mapper.get config.oauth_protected_resource_path,
+               to: "mcp_toolkit/oauth#protected_resource", format: false
+    mapper.get config.oauth_authorization_server_path,
+               to: "mcp_toolkit/oauth#authorization_server", format: false
   end
 
   # Removes an existing same-named constant (avoiding a redefinition warning on a

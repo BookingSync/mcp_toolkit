@@ -1,3 +1,190 @@
+## [0.6.0] - 2026-07-16
+
+An OAuth 2.1 authorization bridge for the authority role, so hosted MCP clients
+that will only authenticate by discovering an authorization server and running a
+browser flow can reach a server whose tokens are issued out-of-band. Additive and
+opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
+
+### Added
+
+- **OAuth authorization bridge (authority-only, opt-in).** A standards-shaped
+  envelope around the tokens a host ALREADY issues — not an identity provider. Its
+  authorization page asks an operator to paste an existing access token, and the
+  `access_token` it returns IS that token, verified through the same
+  `config.token_authenticator` the transport uses. Scopes, expiry, revocation and
+  tenancy stay entirely with the host; the bridge widens nobody's reach.
+
+  Deliberately not implemented, because none of it gates anything here: client
+  registration returns an identifier and stores nothing (no endpoint reads a
+  `client_id`); there is no consent step (pasting a token you already hold is the
+  grant); no refresh token is issued (the pasted token's own expiry is the real
+  lifetime, so a client re-runs the flow rather than refreshing a shadow of it).
+
+  Deliberately NOT mocked, because faking either would create a real vulnerability
+  rather than skip a ceremony: `redirect_uri` is checked against the host's policy
+  on BOTH legs (below), and the PKCE `code_verifier` is verified (constant-time)
+  against the stored S256 `code_challenge`.
+
+  **Which clients may receive a code.** The authorization page is served from the
+  host's own origin, under its own certificate, and asks an operator to paste a
+  live token — so an unvetted `redirect_uri` does not merely add an open redirect,
+  it makes the host's own domain a credential-phishing page: an attacker sends the
+  operator an authorize link carrying the attacker's own `code_challenge`, the
+  operator pastes, and the code is delivered to the attacker, who redeems it with
+  the verifier they chose. PKCE cannot help — they own the verifier.
+
+  So every redirect target must be named by exact string in
+  `config.oauth_allowed_redirect_uris`, with exactly ONE exception:
+  **loopback** (`http://127.0.0.1:*`, `localhost`, `[::1]`), enabled by
+  `config.oauth_allow_loopback_redirects`. It is the exception because it is the
+  one target that CANNOT be named even in principle — an MCP client on an
+  operator's machine listens on an ephemeral port chosen at runtime, so no list
+  could enumerate it (RFC 8252 §7.3 exists for this) — and because a loopback
+  address resolves on the operator's OWN machine, so the attack above, which needs
+  the code to reach a REMOTE attacker, does not work through it.
+
+  A private-use scheme (`cursor://…`, §7.1) is NOT covered: its redirect URI is a
+  fixed string, so it just goes in the allowlist. There is no forcing reason to
+  accept one unnamed, and whole schemes cannot be accepted generically anyway —
+  separating a private-use scheme from a registered network one (`ssh:`, `ldap:`,
+  `gopher:`, each naming a REMOTE host) would mean enumerating the IANA registry,
+  and a denylist of the ones you thought of is the shape that fails open.
+
+  Loopback is judged on the PARSED URI: `http://127.0.0.1@evil.example/` has host
+  `evil.example` and is remote, as is `http://127.0.0.1.evil.example/`; a fragment
+  is refused.
+
+  Endpoints — `GET`/`POST` `<mcp>/oauth/authorize`, `POST <mcp>/oauth/token`,
+  `POST <mcp>/oauth/register`, plus the two metadata documents. A `/.well-known/*`
+  path cannot be drawn by an engine mounted under a path, so a host adds one line at
+  the top level of its route set: `McpToolkit.draw_oauth_metadata_routes(self)` (a
+  no-op unless the bridge is configured). Every identifier is derived from the live
+  request origin, so each host name an app answers on works without further
+  configuration.
+
+  **Additive to a host's own OAuth provider, and it claims nothing origin-global.**
+  The flow endpoints live under the engine's mount (`<mcp>/oauth/*`), so a host
+  already serving OAuth at the conventional top-level `/oauth/*` — as an app with
+  Doorkeeper for its own API does — keeps every one of those routes. The metadata
+  documents are PATH-SCOPED to the mount
+  (`/.well-known/oauth-protected-resource/mcp`), never the bare
+  `/.well-known/oauth-authorization-server`: the bare paths are origin-global and
+  mean "the authorization server of this whole origin", which belongs to that
+  pre-existing provider. RFC 8414 §3.1 exists for exactly this ("Using path
+  components enables supporting multiple issuers per host"), and the MCP
+  authorization spec (2025-11-25) requires a client given a path-ful issuer to try
+  the path-INSERTED URLs with no root fallback — so the issuer is the MCP endpoint
+  URL itself. A host mounted AT its origin root has no path to insert and gets the
+  bare paths, which is correct there.
+- `config.oauth_allowed_redirect_uris` (default `[]`; entries are validated at
+  assignment and the list is frozen — an unparseable, scheme-less,
+  fragment-bearing or *opaque* URI raises, as does cleartext `http://` to a remote
+  host and the `javascript:`/`data:`/`file:` schemes a browser treats as script.
+  Naming bad schemes is sound here and nowhere else: this list is what the HOST
+  wrote, so there is no unlisted scheme for an attacker to slip through — unlike
+  the request-time policy, which is why that one takes the opposite shape),
+  `config.oauth_allow_loopback_redirects` (default `false`),
+  `config.oauth_resource_path` (default `"/mcp"` — must match the engine's mount
+  point), `config.oauth_authorization_code_ttl` (default `60`),
+  `config.oauth_signing_secret` (defaults to the Rails app's `secret_key_base`),
+  and `config.oauth_parent_controller` (default `"ActionController::Base"`).
+- `config.oauth_bridge?` — whether the bridge is live. Gated on the authority role;
+  on a `token_authenticator` being set, since the bridge verifies the pasted token
+  through it on both legs and drawing no route beats an authorization page that
+  takes an operator's token and then errors; and on at least one redirect target
+  being named (an allowlist entry or the loopback switch), so it cannot run
+  without a bound answer to who may receive a code. A satellite — whose tokens
+  belong to its central app — never draws it.
+- The token response is served `Cache-Control: no-store` + `Pragma: no-cache`, a
+  MUST of RFC 6749 §5.1 for any response carrying a token. Both metadata documents
+  get the same headers for a subtler reason: they name the
+  `authorization_endpoint` an operator will be sent to and are built from the
+  caller-influenced request origin (`request.base_url` honours `X-Forwarded-Host`),
+  so a shared cache holding one could hand every client an origin an attacker
+  chose, with the document itself vouching for it. Hosts should also pin
+  `config.hosts`, which Rails leaves empty in production by default.
+- `POST <mcp>/oauth/authorize` answers **303**, not Rails' default 302. That POST
+  carried the operator's token in its body, and only 303 unambiguously tells the
+  browser to fetch the callback with GET and no body (RFC 9700 §4.12).
+- The authority transport's 401 now carries
+  `WWW-Authenticate: Bearer resource_metadata="..."` when the bridge is configured —
+  the header a hosted client waits for before it will start a flow at all. Absent
+  otherwise, so an opted-out host's 401 is unchanged.
+
+### Notes
+
+- **An authorization code leaves nothing usable in the cache.** The entry is keyed
+  by the code's SHA256, and its payload is sealed with `MessageEncryptor`
+  (AES-256-GCM) under a key HMAC'd from `config.oauth_signing_secret` **and** the
+  code. Worth the few lines because what is parked there for the code's lifetime
+  is not the short-lived credential an authorization server would normally hold:
+  it is the operator's pre-existing, long-lived, full-scope token, in a store
+  hosts are told to point at their shared `Rails.cache`.
+
+  The secret is in the key for a specific reason: **the code alone must not be
+  it.** Rails logs an authorization code twice per flow at INFO — `Redirected to
+  ...?code=...` (only `config.filter_redirect` touches that line) and the token
+  endpoint's `Parameters:` (no stock `filter_parameters` entry matches `code`) —
+  so keying on the code alone would leave the key to the cache sitting in the one
+  artifact that is more widely read, longer retained and more replicated than the
+  60-second entry it protects. With the secret mixed in, the cache, the logs and
+  the code together still open nothing.
+
+  The serializer is pinned to `NullSerializer` for a similar reason: every
+  ActiveSupport default across the supported range (`:marshal`, and 7.1+'s
+  `:json_allow_marshal`) reaches `Marshal.load`, so a host with cache-write access
+  forging one blob would have had code execution. `JSON.parse` is now the only
+  parser that sees the payload.
+
+  Codes are also single-use by the DELETE rather than the read, so of two
+  concurrent redemptions exactly one proceeds (verified on MemoryStore, Redis and
+  MemCache stores).
+- The bridge's controller is built from its own `config.oauth_parent_controller`
+  rather than the `parent_controller` the transport uses. The transport is a
+  JSON-only endpoint whose parent is typically `ActionController::API`, which
+  cannot render an HTML view — and the authorization page is one. Keeping them
+  separate means enabling the bridge changes nothing about the transport. Point
+  `oauth_parent_controller` at your own `ApplicationController` to inherit app
+  branding; the page renders with `layout: false` either way.
+- The engine adds `access_token` and `code_verifier` to `config.filter_parameters`
+  itself. The bridge takes a live token in a POST body and Rails logs parameters
+  at INFO, so filtering it is the gem's business — a `rails new` app happens to
+  ship a `:token` entry that covers `access_token` by substring, but that is a
+  host default the gem does not own and an `--api` host may not have.
+- **Serve the bridge over HTTPS** (`config.force_ssl`). The authorization page
+  receives a live access token; on cleartext it is on the wire. A cleartext remote
+  `redirect_uri` is refused in the allowlist for the same reason, but the gem
+  cannot make a host's own origin HTTPS.
+- The bad-paste page answers **422 as an integer**, not a symbol: the gemspec pins
+  no Rack floor and neither symbol spans the supported range
+  (`:unprocessable_content` raises below Rack 3.1, `:unprocessable_entity` is
+  deprecated above it), so a symbol would turn a mistyped paste into an
+  unauthenticated 500 on Rails 7.x.
+- `config.oauth_allowed_redirect_uris` is **frozen** once assigned, and
+  `config.oauth_signing_secret=` validates its input. Both are the same lesson:
+  validation that can be bypassed (`<<` onto the reader) or skipped (a bare
+  writer) is a suggestion, and both failures surface at request time — after an
+  operator has pasted a live token.
+- **A host MUST pin `config.hosts`.** Every identifier the bridge publishes is
+  derived from `request.base_url`, which honours `X-Forwarded-Host`. Rails does
+  not pin it for you — it populates `config.hosts` in development and leaves it
+  empty in production, where empty means no host checking at all.
+- **A host MUST point `config.cache_store` at a shared store** before running the
+  bridge on more than one worker. The default is an in-process MemoryStore, which
+  cannot carry a code from the worker that issued it to the worker that redeems
+  it: the flow then fails roughly (N-1)/N of the time, intermittently, and only
+  after the operator has pasted a live token. Warned about once at boot rather
+  than gated, because a MemoryStore is correct in a single process and
+  `Rails.cache` IS one in a stock development environment.
+- The bridge's two browser legs are guarded by a `before_action` rather than a
+  check inside each action, so the guard cannot be routed around: `authorize` is
+  a common method name, and a gem defining one on `ActionController::Base` would
+  drop the action from Rails' `action_methods` and have Rails serve the template
+  by implicit render — skipping a guard that lived in the body.
+- A host restyles the page by defining its own
+  `app/views/mcp_toolkit/oauth/authorize.html.erb`, which takes precedence over the
+  engine's.
+
 ## [0.5.0] - 2026-07-14
 
 Authority-path discoverability + backward-compatibility work (driven by an

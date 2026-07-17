@@ -62,6 +62,15 @@ RSpec.describe "Mountable engine + gem controller" do
         expect(McpToolkit::ServerController.include?(McpToolkit::Transport::ControllerMethods)).to be(false)
       end
     end
+
+    # The bridge's parent (default ActionController::Base) must not be
+    # constantized on a host that never enables it: that would pull view
+    # machinery into an API-only app and break a non-Rails host outright. Its
+    # absence here is what proves the build is skipped — this whole suite runs
+    # without Rails, so a constantize would raise NameError.
+    it "does not build the OAuth controller when the bridge is off" do
+      expect(McpToolkit.const_defined?(:OauthController, false)).to be(false)
+    end
   end
 
   describe "McpToolkit::Engine routes" do
@@ -81,8 +90,18 @@ RSpec.describe "Mountable engine + gem controller" do
           instance_eval(&block)
         end
 
+        # `format:` is recorded separately (see `drawn_formats`): the bridge's
+        # routes must disable Rails' optional format segment, and a recorder that
+        # swallowed the option would let that regress unseen.
         %i[post get delete].each do |verb|
-          define_method(verb) { |path, to:| @drawn << [verb, path, to] }
+          define_method(verb) do |path, to:, **options|
+            @drawn << [verb, path, to]
+            (@formats ||= {})[[verb, path]] = options[:format]
+          end
+        end
+
+        def drawn_formats
+          @formats ||= {}
         end
       end.new
     end
@@ -91,9 +110,23 @@ RSpec.describe "Mountable engine + gem controller" do
     # Default to :authority so the full endpoint set is asserted; the satellite
     # context below covers the gated-off case.
     let(:auth_role) { :authority }
+    # The OAuth bridge is off until a host names who may receive an authorization
+    # code, so it stays out of the default endpoint set.
+    let(:oauth_redirect_uris) { [] }
+    let(:oauth_allow_native) { false }
+    # The bridge also needs the authenticator it verifies a pasted token with; an
+    # authority always has one. Its own gate is asserted below.
+    let(:token_authenticator) { ->(_plaintext) { nil } }
+    # No Rails in this suite, so the secret_key_base default cannot resolve; the
+    # gate's own requirement for it is asserted separately below.
+    let(:oauth_signing_secret) { "spec-oauth-signing-secret-at-least-32-bytes-long" }
 
     before do
       McpToolkit.config.auth_role = auth_role
+      McpToolkit.config.oauth_allowed_redirect_uris = oauth_redirect_uris
+      McpToolkit.config.oauth_allow_loopback_redirects = oauth_allow_native
+      McpToolkit.config.token_authenticator = token_authenticator
+      McpToolkit.config.oauth_signing_secret = oauth_signing_secret
       recorder = route_recorder
       stub_const("Rails", Module.new)
       # The engine class body now also calls `config.to_prepare { ... }` (lazy
@@ -102,6 +135,10 @@ RSpec.describe "Mountable engine + gem controller" do
       config_double = Class.new { def to_prepare(*); end }.new
       engine_base = Class.new do
         define_singleton_method(:isolate_namespace) { |_mod| }
+        # The engine also registers an initializer (filter_parameters for the
+        # bridge's token-bearing params); recorded, not run — this unit boots no app.
+        define_singleton_method(:initializer) { |name, &block| (@initializers ||= {})[name] = block }
+        define_singleton_method(:initializers) { @initializers ||= {} }
       end
       engine_base.define_singleton_method(:config) { config_double }
       stub_const("Rails::Engine", engine_base)
@@ -134,6 +171,83 @@ RSpec.describe "Mountable engine + gem controller" do
       let(:auth_role) { :satellite }
 
       it "draws the transport endpoints but NOT the authority introspection route" do
+        expect(route_recorder.drawn).to contain_exactly(*transport_routes)
+      end
+    end
+
+    oauth_routes = [
+      [:get, "oauth/authorize", "oauth#authorize"],
+      [:post, "oauth/authorize", "oauth#approve"],
+      [:post, "oauth/token", "oauth#token"],
+      [:post, "oauth/register", "oauth#register"]
+    ]
+
+    it "does NOT draw the OAuth bridge for an authority that has not opted in" do
+      expect(route_recorder.drawn).not_to include(*oauth_routes)
+    end
+
+    context "when the OAuth bridge is configured on an authority" do
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+
+      it "draws the bridge's endpoints" do
+        expect(route_recorder.drawn).to include(*oauth_routes)
+      end
+
+      # Without this, Rails' optional `(.:format)` matches and
+      # `/mcp/oauth/authorize.json` reaches the action, finds no JSON template and
+      # 500s — an unauthenticated error for a format the bridge never speaks.
+      it "disables the format segment on every bridge endpoint" do
+        formats = oauth_routes.map { |verb, path, _| route_recorder.drawn_formats[[verb, path]] }
+
+        expect(formats).to all(be(false))
+      end
+    end
+
+    # Allowing native clients names who may receive a code just as an allowlist
+    # entry does ("anything on my operators' machines"), so it is an opt-in in its
+    # own right — a host serving only desktop MCP clients needs no allowlist.
+    context "when an authority allows native clients but names no allowlist" do
+      let(:oauth_allow_native) { true }
+
+      it "draws the bridge's endpoints" do
+        expect(route_recorder.drawn).to include(*oauth_routes)
+      end
+    end
+
+    # The bridge verifies the pasted token through the authenticator on both legs,
+    # so without one it cannot work. Drawing no route at all beats an authorization
+    # page that takes an operator's token and then errors.
+    context "when an authority named a redirect target but configured no token_authenticator" do
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+      let(:token_authenticator) { nil }
+
+      # Still an authority, so its introspection route is unaffected — it is only
+      # the bridge that goes away.
+      it "still draws no OAuth bridge" do
+        expect(route_recorder.drawn).not_to include(*oauth_routes)
+      end
+    end
+
+    # Without a server-held secret the bridge cannot seal a code's payload, and
+    # must not fall back to sealing it with something weaker. A Rails host never
+    # sees this — it inherits secret_key_base.
+    context "when an authority has no signing secret to resolve" do
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+      let(:oauth_signing_secret) { nil }
+
+      it "still draws no OAuth bridge" do
+        expect(route_recorder.drawn).not_to include(*oauth_routes)
+      end
+    end
+
+    # The flow hands back a token this app authenticates itself; a satellite's
+    # tokens belong to its central app, so there is nothing for it to authorize
+    # against — an allowlist alone must not switch the bridge on.
+    context "when a satellite configures a redirect allowlist" do
+      let(:auth_role) { :satellite }
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+
+      it "still draws no OAuth bridge" do
         expect(route_recorder.drawn).to contain_exactly(*transport_routes)
       end
     end

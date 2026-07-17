@@ -36,4 +36,19 @@ class McpToolkit::Engine < Rails::Engine
   # reload so a changed parent (or a reloaded app parent class) takes effect on the
   # next reference. Runs before `:eager_load!`, so the fresh classes exist for it.
   config.to_prepare { McpToolkit.reset_engine_controllers! }
+
+  # The OAuth bridge takes the operator's live access token in a POST body, and
+  # Rails logs request parameters at INFO. Filtering it is therefore the gem's
+  # business, not a deployment note: a `rails new` app happens to ship a `:token`
+  # entry that covers `access_token` by substring, but that is a host default this
+  # gem does not own and an `--api` or hand-rolled host may not have. Additive, so
+  # a host's own list is untouched, and harmless when the bridge is off.
+  #
+  # `code_verifier` is belt-and-braces (a logged verifier is worthless once the
+  # code is spent, and the code is burnt on read). `code` is deliberately NOT
+  # filtered: it is single-use, useless without the verifier, and matching it
+  # would filter every `country_code`/`state_code` a host logs.
+  initializer "mcp_toolkit.filter_oauth_parameters" do |app|
+    app.config.filter_parameters += %i[access_token code_verifier]
+  end
 end

@@ -381,6 +381,7 @@ module McpToolkit::Authority::ControllerMethods
   # ---- error renders --------------------------------------------------
 
   def mcp_render_unauthorized(message)
+    mcp_set_authenticate_challenge
     render json: {
       jsonrpc: McpToolkit::Protocol::JSONRPC_VERSION,
       id: nil,
@@ -389,6 +390,29 @@ module McpToolkit::Authority::ControllerMethods
         message: "Unauthorized: #{message}"
       }
     }, status: :unauthorized
+  end
+
+  # Points an unauthenticated caller at the OAuth bridge's protected-resource
+  # metadata (RFC 9728). This header is what a hosted MCP client waits for before
+  # it will start an authorization flow at all — without it, a 401 is just a
+  # failure. It also makes the metadata's location OURS to state rather than the
+  # client's to guess: RFC 9728 has the client fetch this URL directly, so the
+  # path-scoped location is found without probing the origin's bare well-known
+  # path. Emitted only when the bridge is configured, so a host that has not opted
+  # in keeps its 401 byte-identical.
+  #
+  # `request.base_url` honours `X-Forwarded-Host`, so it is caller-influenced and
+  # cannot be interpolated into a quoted-string parameter unescaped: a host
+  # carrying a `"` would close the quotes and let a caller append auth-params of
+  # their own. A URL has no business containing one, so refuse rather than escape
+  # — an origin that odd is a misconfiguration to notice, not to render.
+  def mcp_set_authenticate_challenge
+    return unless mcp_config.oauth_bridge?
+
+    metadata_url = "#{request.base_url}#{mcp_config.oauth_protected_resource_path}"
+    return if metadata_url.include?('"')
+
+    response.headers["WWW-Authenticate"] = %(Bearer resource_metadata="#{metadata_url}")
   end
 
   def mcp_render_session_not_found

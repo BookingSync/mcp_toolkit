@@ -1,0 +1,83 @@
+<%#
+  The bridge's only human-facing surface: paste an access token you already hold.
+
+  Rendered with `layout: false`, so this is a whole document and carries its own
+  styles inline — it must not depend on the host's asset pipeline. A host that
+  wants its own branding defines app/views/mcp_toolkit/oauth/authorize.html.erb
+  in its own tree, which takes precedence over this one.
+
+  The authorization parameters ride through as hidden fields because the bridge
+  keeps no state between the two legs. They are re-validated on POST — the
+  redirect_uri against the allowlist — so a tampered field cannot widen anything.
+%>
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Connect to <%= McpToolkit.config.server_name %></title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        padding: 1.5rem; box-sizing: border-box;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.5;
+        background: #f4f4f5; color: #18181b;
+      }
+      main { width: 100%; max-width: 26rem; background: #fff; border-radius: 0.75rem; padding: 2rem;
+             box-shadow: 0 1px 3px rgb(0 0 0 / 0.1), 0 8px 24px rgb(0 0 0 / 0.06); }
+      h1 { margin: 0 0 0.5rem; font-size: 1.25rem; }
+      p { margin: 0 0 1.5rem; color: #52525b; font-size: 0.9375rem; }
+      label { display: block; margin-bottom: 0.375rem; font-size: 0.875rem; font-weight: 600; }
+      input[type="password"] {
+        width: 100%; box-sizing: border-box; padding: 0.625rem 0.75rem; font-size: 1rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        border: 1px solid #d4d4d8; border-radius: 0.375rem; background: #fff; color: inherit;
+      }
+      input[type="password"]:focus { outline: 2px solid #2563eb; outline-offset: 1px; border-color: #2563eb; }
+      button {
+        width: 100%; margin-top: 1.25rem; padding: 0.625rem 1rem; font-size: 0.9375rem; font-weight: 600;
+        color: #fff; background: #18181b; border: 0; border-radius: 0.375rem; cursor: pointer;
+      }
+      button:hover { background: #3f3f46; }
+      .error {
+        margin: 0 0 1.25rem; padding: 0.75rem; border-radius: 0.375rem; font-size: 0.875rem;
+        background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+      }
+      @media (prefers-color-scheme: dark) {
+        body { background: #18181b; color: #fafafa; }
+        main { background: #27272a; box-shadow: none; border: 1px solid #3f3f46; }
+        p { color: #a1a1aa; }
+        input[type="password"] { background: #18181b; border-color: #52525b; }
+        button { background: #fafafa; color: #18181b; }
+        button:hover { background: #d4d4d8; }
+        .error { background: #450a0a; border-color: #7f1d1d; color: #fecaca; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Connect to <%= McpToolkit.config.server_name %></h1>
+      <p>Paste your access token to finish connecting. It is not shown again after this step.</p>
+
+      <% if @mcp_oauth_error.present? %>
+        <div class="error" role="alert"><%= @mcp_oauth_error %></div>
+      <% end %>
+
+      <%= form_tag request.path, method: :post do %>
+        <%= hidden_field_tag :redirect_uri, params[:redirect_uri] %>
+        <%= hidden_field_tag :state, params[:state] %>
+        <%= hidden_field_tag :code_challenge, params[:code_challenge] %>
+        <%= hidden_field_tag :code_challenge_method, params[:code_challenge_method] %>
+
+        <label for="access_token">Access token</label>
+        <%= password_field_tag :access_token, nil, id: "access_token", autocomplete: "off",
+                               autocapitalize: "off", autocorrect: "off", spellcheck: false,
+                               autofocus: true, required: true %>
+
+        <button type="submit">Connect</button>
+      <% end %>
+    </main>
+  </body>
+</html>

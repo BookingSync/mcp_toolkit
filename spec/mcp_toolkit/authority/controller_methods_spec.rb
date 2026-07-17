@@ -30,7 +30,8 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
       end
 
       def request
-        @request ||= Struct.new(:headers, :body).new(request_headers, StringIO.new(request_body.to_s))
+        @request ||= Struct.new(:headers, :body, :base_url)
+                           .new(request_headers, StringIO.new(request_body.to_s), "https://mcp.example.test")
       end
 
       def response
@@ -250,6 +251,47 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
 
       expect(controller.send(:mcp_principal)).to be(token)
       expect(token).to have_received(:touch_last_used!)
+    end
+
+    # A hosted MCP client will not start an authorization flow off a bare 401; this
+    # header is what tells it where to look. See McpToolkit::Oauth::ControllerMethods.
+    context "when the OAuth bridge is configured" do
+      before do
+        McpToolkit.config.auth_role = :authority
+        McpToolkit.config.oauth_allowed_redirect_uris = ["https://client.example/callback"]
+        # Rejects every token — the caller in these examples is unauthenticated —
+        # but its PRESENCE is part of what makes the bridge configured at all.
+        McpToolkit.config.token_authenticator = ->(_plaintext) { nil }
+        # Likewise: no Rails here, so the secret_key_base default cannot resolve.
+        McpToolkit.config.oauth_signing_secret = "spec-oauth-signing-secret-at-least-32-bytes-long"
+      end
+
+      # Path-scoped: stating the location outright is also what keeps a client from
+      # probing the origin's bare, globally-meaningful well-known path.
+      it "challenges an unauthenticated caller with the path-scoped protected-resource metadata url" do
+        controller.send(:mcp_authenticate!)
+
+        expect(controller.response.headers["WWW-Authenticate"]).to eq(
+          %(Bearer resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource/mcp")
+        )
+      end
+
+      # `base_url` honours X-Forwarded-Host, so it is caller-influenced: a quote
+      # in it would close the quoted-string and let a caller append auth-params of
+      # their own. A URL cannot legitimately contain one, so the challenge is
+      # withheld rather than emitted broken.
+      it "emits no challenge at all when the request origin contains a quote" do
+        controller.request.base_url = 'https://evil.example"; x="y'
+        controller.send(:mcp_authenticate!)
+
+        expect(controller.response.headers).not_to have_key("WWW-Authenticate")
+      end
+    end
+
+    it "leaves the 401 unchallenged when the bridge is not configured (an opted-out host is unaffected)" do
+      controller.send(:mcp_authenticate!)
+
+      expect(controller.response.headers).not_to have_key("WWW-Authenticate")
     end
   end
 

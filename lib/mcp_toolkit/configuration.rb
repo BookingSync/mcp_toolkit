@@ -112,6 +112,214 @@ class McpToolkit::Configuration
   # @return [#call, nil]
   attr_accessor :token_authenticator
 
+  # --- auth: OAuth authorization bridge (authority-only) ---------------------
+  #
+  # An OAuth 2.1 authorization-code + PKCE envelope around the tokens the host
+  # ALREADY issues, for hosted MCP clients that will only authenticate by
+  # discovering an authorization server and running a browser flow (and that
+  # cannot be handed a token in the request URI, which the MCP authorization spec
+  # forbids). It authenticates nobody: its authorization page asks the operator
+  # to paste an existing access token and hands that same token back. See
+  # McpToolkit::Oauth::ControllerMethods.
+
+  # The exact redirect URIs an authorization code may be handed to — the
+  # allowlist a REMOTE client's `redirect_uri` is matched against by exact
+  # string. This is the bridge's load-bearing control: without it the authorize
+  # endpoint would be an open redirect that emits authorization codes.
+  #
+  # Why it cannot just be opened up to "any client": the page is served from the
+  # host's OWN origin under its own certificate and asks for a live token, so an
+  # unvetted `redirect_uri` makes it a credential-phishing page hosted by the host
+  # itself — an attacker sends the operator an authorize link carrying the
+  # attacker's `code_challenge`, the operator pastes, and the code goes to the
+  # attacker, who redeems it with the verifier they chose. PKCE cannot help; they
+  # own the verifier. This list IS the redirect-URI registration a real
+  # authorization server does, and it is the only thing standing in for it.
+  #
+  # Be precise about what it does NOT cover, because the boundary is easy to
+  # overstate. It binds which URL a code may be sent to — not whose session at
+  # that URL receives it. Point it at a MULTI-TENANT client (which is the usual
+  # case: a hosted MCP client is one callback shared by every user) and an
+  # attacker can still start a flow in their OWN account there, send the operator
+  # the resulting authorize link, and have the code land back at that client
+  # carrying the attacker's `state`. Whether the operator's token then ends up in
+  # the attacker's account is decided entirely by whether the CLIENT binds
+  # `state` to the browser session that began the flow (RFC 6819 §4.4.1.7; RFC
+  # 9700 §4.7.1) — an authorization server cannot bind a code to a session it
+  # never saw, so no amount of consent or authentication here would close it. A
+  # real authorization server has exactly the same exposure. Only allowlist
+  # clients you believe handle `state` correctly.
+  #
+  # EMPTY BY DEFAULT. Empty, and with `oauth_allow_loopback_redirects` off,
+  # the bridge is DISABLED entirely (see `oauth_bridge?`) — so it cannot be
+  # switched on without naming who may receive a code, and a host that wants
+  # nothing to do with it sets nothing.
+  #
+  #   c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
+  #
+  # @return [Array<String>]
+  attr_reader :oauth_allowed_redirect_uris
+
+  # Assigns the allowlist, rejecting an entry the bridge must not, or could not,
+  # redirect to. Validated at CONFIG time for the same reason
+  # `filter_operator_overrides=` is: the alternative is a request-time failure,
+  # and here that failure lands at the worst possible moment — the authorize page
+  # renders, the operator pastes a live token, the token is verified, a code is
+  # written to the cache, and only THEN does the callback URL turn out to be
+  # unusable. A typo would cost the operator their paste.
+  #
+  # The result is FROZEN, so validation is a gate rather than a suggestion: an
+  # `<<` onto the reader would otherwise slip an unchecked entry straight past
+  # this method. (`config.oauth_allowed_redirect_uris << "…#frag"` used to work,
+  # and a fragment is not a harmless typo — the emitted `…/cb#frag?code=…` puts
+  # the code in the browser's HASH, so it never reaches the client's server and
+  # is readable by any script on the page.)
+  #
+  # See `oauth_redirect_uri_problem` for what is rejected and why.
+  def oauth_allowed_redirect_uris=(uris)
+    entries = Array(uris).map { |uri| uri.to_s.dup.freeze }
+    entries.each do |uri|
+      problem = oauth_redirect_uri_problem(uri)
+      next unless problem
+
+      raise ArgumentError, "oauth_allowed_redirect_uris contains #{uri.inspect}: #{problem}"
+    end
+    @oauth_allowed_redirect_uris = entries.freeze
+  end
+
+  # Permits LOOPBACK redirect targets on any port without naming each one:
+  # `http://127.0.0.1:54321/cb`, `http://localhost:*/cb`, `http://[::1]:*/cb`.
+  #
+  # This is the one target that cannot be allowlisted even in principle — an MCP
+  # client on an operator's machine listens on an ephemeral port chosen at
+  # runtime, so no list could enumerate it (RFC 8252 §7.3 exists for exactly
+  # this). And it is safe to accept unnamed for the same reason the list above
+  # cannot be opened up: a loopback address resolves on the operator's OWN
+  # machine, so the phishing described above — which needs the code to reach a
+  # REMOTE attacker — does not work through it.
+  #
+  # Note what this deliberately does NOT cover: a private-use scheme
+  # (`cursor://…`, RFC 8252 §7.1). Those keep the code on the device too, but
+  # their redirect URI is a FIXED STRING, so it simply goes in the list above —
+  # there is no forcing reason to accept one unnamed. And whole schemes cannot be
+  # accepted generically anyway: separating a private-use scheme from a
+  # registered network one (`ssh:`, `ldap:`, `gopher:` — each naming a remote
+  # host) would mean enumerating the IANA registry, and a denylist of the ones
+  # you happened to think of is the shape that fails open.
+  #
+  # A remote `https://` callback is never covered by this, whatever it is set to.
+  #
+  # OFF BY DEFAULT: switching it on says "any client on my operators' machines may
+  # receive a code", which is a decision, not a default — and so is an opt-in
+  # signal in its own right.
+  #
+  #   c.oauth_allow_loopback_redirects = true
+  #
+  # @return [Boolean]
+  attr_accessor :oauth_allow_loopback_redirects
+
+  # The path McpToolkit::Engine is mounted at, used to build the `resource`
+  # identifier, the issuer, the two metadata locations, and the bridge's own
+  # endpoint URLs (their origin comes from the live request, so every host name
+  # the app answers on works). MUST match the actual mount point, and the
+  # `resource` it yields MUST equal the MCP endpoint URL as an operator types it
+  # into their client.
+  #
+  # This path is ALSO what keeps the bridge out of the origin's global namespace
+  # — see `oauth_protected_resource_path`.
+  #
+  # @return [String]
+  attr_accessor :oauth_resource_path
+
+  # Seconds an issued authorization code stays redeemable. Codes are single-use
+  # (read-and-deleted at exchange); this only bounds a code that is never
+  # redeemed. Short by design — a client exchanges immediately.
+  #
+  # @return [Integer]
+  attr_accessor :oauth_authorization_code_ttl
+
+  # The server-held secret mixed into the key that seals a cached authorization
+  # code's payload (McpToolkit::Oauth::ControllerMethods#mcp_oauth_encryptor).
+  #
+  # It exists because the code alone must NOT be the key: Rails logs an
+  # authorization code twice per flow at INFO, so the logs would otherwise carry
+  # the key to the cache entry. This secret never reaches a log or a response, so
+  # the cache and the logs together still open nothing without it.
+  #
+  # Defaults to the Rails app's `secret_key_base` (lazily, so load order and a
+  # non-Rails host are both fine), which is exactly the "server-held, in ENV,
+  # never logged" property wanted — so a Rails host configures nothing. A
+  # non-Rails host MUST set it; the bridge refuses to run without one
+  # (`oauth_bridge?`), rather than silently sealing with a weak key.
+  #
+  #   c.oauth_signing_secret = ENV.fetch("MCP_OAUTH_SIGNING_SECRET")
+  #
+  # Use `fetch`, not `ENV["..."]`: a nil from a missing var falls back to
+  # `secret_key_base` silently, leaving a host believing it runs a dedicated
+  # secret when it does not.
+  #
+  # Rotating it invalidates in-flight codes (a 60s window), nothing else — the
+  # tokens themselves are the host's and are untouched.
+  #
+  # @return [String, nil]
+  #
+  # Validated at assignment, like `oauth_allowed_redirect_uris=` — a non-String
+  # here passed `oauth_bridge?`, drew the routes, and then raised a TypeError out
+  # of `OpenSSL::HMAC` at request time: after the operator pasted a live token and
+  # a code was already cached. That is the exact failure the sibling setter exists
+  # to prevent, so it gets the same treatment.
+  def oauth_signing_secret=(secret)
+    raise ArgumentError, "oauth_signing_secret must be a String, got #{secret.class}" if secret && !secret.is_a?(String)
+
+    if secret.is_a?(String) && !secret.empty? && secret.bytesize < MINIMUM_SIGNING_SECRET_BYTES
+      raise ArgumentError,
+            "oauth_signing_secret is #{secret.bytesize} bytes; use at least " \
+            "#{MINIMUM_SIGNING_SECRET_BYTES} (a real secret_key_base is 128)"
+    end
+
+    @oauth_signing_secret = secret
+  end
+
+  # Short enough to admit any real secret, long enough to catch a placeholder.
+  #
+  # Deliberately NOT applied to the `secret_key_base` fallback, which is checked
+  # for presence only. The minimum exists to catch a placeholder a host typed into
+  # THIS setting; `secret_key_base` is Rails' own, is 128 chars in a real
+  # deployment, and is short only in environments where Rails generates a throwaway
+  # (a stock test env is ~15 bytes). A genuinely weak `secret_key_base` is an
+  # app-wide problem — signed cookies, message verifiers, Active Record encryption
+  # — and not this gem's to police from the outside.
+  MINIMUM_SIGNING_SECRET_BYTES = 32
+
+  # Reads the configured secret, else the Rails app's `secret_key_base`. Resolved
+  # lazily rather than in the initializer: the gem loads before a Rails app is
+  # fully configured, and a non-Rails host has no `Rails` constant at all.
+  def oauth_signing_secret
+    return @oauth_signing_secret if @oauth_signing_secret
+
+    return nil unless defined?(::Rails) && ::Rails.respond_to?(:application) && ::Rails.application
+
+    ::Rails.application.secret_key_base
+  end
+
+  # The parent class of the bridge's controller, SEPARATE from
+  # `parent_controller` and defaulting to ActionController::Base.
+  #
+  # They are separate because the two controllers have opposite needs. The MCP
+  # transport is a JSON-only endpoint, so a host quite reasonably points
+  # `parent_controller` at `ActionController::API` — which cannot render an HTML
+  # view. The bridge's authorization page IS an HTML view. Deriving it from
+  # `parent_controller` would therefore force a host to weaken its transport's
+  # superclass just to switch the bridge on; keeping them apart means enabling
+  # the bridge changes nothing about the transport.
+  #
+  # Point this at your own `ApplicationController` to inherit app branding (the
+  # page renders with `layout: false` regardless, so an app layout that needs
+  # asset-pipeline context is not pulled in).
+  #
+  # @return [String]
+  attr_accessor :oauth_parent_controller
+
   # --- caching ---------------------------------------------------------------
 
   # The cache store backing sessions and introspection results. Must satisfy the
@@ -434,6 +642,8 @@ class McpToolkit::Configuration
 
     @token_authenticator = nil
 
+    initialize_oauth_bridge_defaults
+
     @cache_store = ActiveSupport::Cache::MemoryStore.new
     initialize_data_path_defaults
 
@@ -452,6 +662,18 @@ class McpToolkit::Configuration
 
     @registry = McpToolkit::Registry.new
     @upstreams = McpToolkit::Gateway::UpstreamRegistry.new
+  end
+
+  # OAuth bridge defaults. The empty redirect allowlist AND the off native-client
+  # switch are jointly what keep the bridge OFF (`oauth_bridge?`), so a host that
+  # never configures it is unaffected.
+  def initialize_oauth_bridge_defaults
+    @oauth_allowed_redirect_uris = []
+    @oauth_allow_loopback_redirects = false
+    @oauth_resource_path = "/mcp"
+    @oauth_authorization_code_ttl = 60
+    @oauth_parent_controller = "ActionController::Base"
+    @oauth_signing_secret = nil # falls back to Rails' secret_key_base — see the reader
   end
 
   # Session-TTL and list-executor defaults: the :tokenized / :created_at
@@ -554,6 +776,149 @@ class McpToolkit::Configuration
   #   introspection.
   def authority?
     auth_role.to_sym == :authority
+  end
+
+  # The well-known prefixes the two metadata documents hang off. The resource
+  # path is INSERTED after these, never appended to the origin — see
+  # `oauth_protected_resource_path`.
+  PROTECTED_RESOURCE_WELL_KNOWN = "/.well-known/oauth-protected-resource"
+  AUTHORIZATION_SERVER_WELL_KNOWN = "/.well-known/oauth-authorization-server"
+
+  # `oauth_resource_path` normalized for URL building: no trailing slash, and
+  # empty when the MCP endpoint IS the origin root (where there is no path
+  # component to insert).
+  #
+  # @return [String] e.g. "/mcp", or "" for a root-mounted endpoint.
+  def oauth_resource_path_component
+    path = oauth_resource_path.to_s.chomp("/")
+    path == "/" ? "" : path
+  end
+
+  # Where the protected-resource metadata (RFC 9728) answers, and where
+  # `WWW-Authenticate` points.
+  #
+  # Path-SCOPED (`/.well-known/oauth-protected-resource/mcp`), never the bare
+  # path, because the bare ones are ORIGIN-GLOBAL: they describe the authorization
+  # server of the whole origin, which on a host already running an unrelated OAuth
+  # provider is that provider's claim to make, not an MCP server's. RFC 8414 §3.1
+  # exists for this — "Using path components enables supporting multiple issuers
+  # per host" — and MCP's 2025-11-25 authorization spec gives a path-ful issuer no
+  # root fallback, so scoping is the correct reading rather than a workaround.
+  #
+  # A root-mounted endpoint has no path to insert and gets the bare paths, which is
+  # correct there: it really is that origin's only authorization server.
+  #
+  # @return [String]
+  def oauth_protected_resource_path
+    "#{PROTECTED_RESOURCE_WELL_KNOWN}#{oauth_resource_path_component}"
+  end
+
+  # Where the authorization-server metadata (RFC 8414) answers. Path-inserted for
+  # the same reason, and it MUST agree with the issuer: a client constructs this
+  # URL from the issuer it was given.
+  #
+  # @return [String]
+  def oauth_authorization_server_path
+    "#{AUTHORIZATION_SERVER_WELL_KNOWN}#{oauth_resource_path_component}"
+  end
+
+  # Whether the OAuth authorization bridge is live: its routes are drawn, and the
+  # authority transport advertises it on a 401 via `WWW-Authenticate`.
+  #
+  # Gated on three conditions, each for its own reason.
+  #
+  # AUTHORITY-ONLY, because the flow hands back a token this app itself
+  # authenticates — a satellite's tokens belong to its central app, so there is
+  # nothing here for it to authorize against.
+  #
+  # A `token_authenticator` must be set, because the bridge cannot function
+  # without one: it verifies the pasted token through it on both legs. Gated
+  # rather than left to fail at request time so a misconfigured host serves no
+  # bridge at all, instead of an authorization page that accepts an operator's
+  # token and then errors — the sibling introspection endpoint fails safe the
+  # same way.
+  #
+  # An `oauth_signing_secret` must resolve, for the same reason: without one the
+  # bridge cannot seal a code's payload, and it must not fall back to sealing
+  # with something weaker. A Rails host gets `secret_key_base` for free.
+  #
+  # And at least one redirect target must be named — an allowlist entry, or the
+  # loopback switch — so the bridge cannot be running without a bound answer to
+  # "who may receive a code". Both are empty/off by default, which is what makes
+  # an unconfigured host byte-identical to one without the bridge.
+  #
+  # NOT gated on a shared `cache_store`, deliberately, even though a per-worker
+  # one breaks the flow (see `oauth_per_process_cache_store?`): a MemoryStore is
+  # correct in a single process, `Rails.cache` IS a MemoryStore in a stock
+  # development environment, and the gem cannot see the worker count. Gating
+  # would make the bridge undevelopable locally to prevent a production mistake,
+  # so that one is a loud warning at boot instead.
+  #
+  # @return [Boolean]
+  def oauth_bridge?
+    return false unless authority?
+    return false if token_authenticator.nil?
+    return false if oauth_signing_secret.to_s.empty?
+
+    Array(oauth_allowed_redirect_uris).any? || !!oauth_allow_loopback_redirects
+  end
+
+  # Why a given allowlist entry must not or cannot receive a code, or nil if it
+  # may. A lint over values the HOST wrote, not a boundary against an attacker —
+  # which is why naming bad schemes is sound here and would not be at request
+  # time: nothing an attacker sends reaches this list, so there is no unlisted
+  # scheme for them to slip through. (Request-time policy takes the opposite
+  # shape for exactly that reason — see
+  # McpToolkit::Oauth::ControllerMethods#mcp_oauth_loopback_redirect_uri?.)
+  def oauth_redirect_uri_problem(uri)
+    parsed = oauth_parse_redirect_uri(uri)
+    return "it is not a valid URI" if parsed.nil?
+
+    scheme = parsed.scheme&.downcase
+    return "it names no scheme" if scheme.nil?
+    return "it carries a fragment, which OAuth forbids on a redirect_uri" unless parsed.fragment.nil?
+    unless parsed.opaque.nil?
+      return "it is opaque (#{scheme}:#{parsed.opaque}) so it cannot carry the code — " \
+             "write it with a path, e.g. #{scheme}:/#{parsed.opaque}"
+    end
+
+    oauth_redirect_scheme_problem(scheme, parsed)
+  end
+
+  # Schemes a browser may treat as script or local content. A code handed to one
+  # is at best lost and at worst executed; no client legitimately registers one.
+  ACTIVE_CONTENT_SCHEMES = %w[javascript data vbscript file blob about view-source].freeze
+
+  def oauth_redirect_scheme_problem(scheme, parsed)
+    if ACTIVE_CONTENT_SCHEMES.include?(scheme)
+      return "#{scheme}: is not a redirect target — a browser treats it as script or local content"
+    end
+    return nil unless scheme == "http"
+    # RFC 8252 §7.3: cleartext is fine to a loopback address, which never leaves
+    # the operator's machine. Anywhere else it puts the code on the wire.
+    return nil if McpToolkit::Oauth.loopback_host?(parsed.host)
+
+    "it is cleartext http to a remote host, which would put the authorization code on the wire — " \
+      "use https (cleartext is only accepted for loopback)"
+  end
+
+  def oauth_parse_redirect_uri(uri)
+    URI.parse(uri)
+  rescue URI::InvalidURIError
+    nil
+  end
+
+  # Whether `cache_store` is per-process, which the bridge cannot survive on a
+  # multi-worker deployment: a code written on the worker that ran leg 1 is
+  # invisible to the worker that runs leg 2, so the exchange reads nil and
+  # answers `invalid_grant` — roughly (N-1)/N of the time, AFTER the operator has
+  # pasted a live token, and intermittently enough to read as a fluke rather than
+  # a misconfiguration. (It also quietly voids the payload sealing: a per-process
+  # store has no snapshot to steal, and its key would be in the same heap.)
+  #
+  # Fine in one process, which is why this warns rather than gates.
+  def oauth_per_process_cache_store?
+    cache_store.is_a?(ActiveSupport::Cache::MemoryStore)
   end
 
   # Full introspection URL the satellite POSTs to. Raises a clear error if the
