@@ -90,8 +90,18 @@ RSpec.describe "Mountable engine + gem controller" do
           instance_eval(&block)
         end
 
+        # `format:` is recorded separately (see `drawn_formats`): the bridge's
+        # routes must disable Rails' optional format segment, and a recorder that
+        # swallowed the option would let that regress unseen.
         %i[post get delete].each do |verb|
-          define_method(verb) { |path, to:| @drawn << [verb, path, to] }
+          define_method(verb) do |path, to:, **options|
+            @drawn << [verb, path, to]
+            (@formats ||= {})[[verb, path]] = options[:format]
+          end
+        end
+
+        def drawn_formats
+          @formats ||= {}
         end
       end.new
     end
@@ -107,12 +117,16 @@ RSpec.describe "Mountable engine + gem controller" do
     # The bridge also needs the authenticator it verifies a pasted token with; an
     # authority always has one. Its own gate is asserted below.
     let(:token_authenticator) { ->(_plaintext) { nil } }
+    # No Rails in this suite, so the secret_key_base default cannot resolve; the
+    # gate's own requirement for it is asserted separately below.
+    let(:oauth_signing_secret) { "spec-oauth-signing-secret" }
 
     before do
       McpToolkit.config.auth_role = auth_role
       McpToolkit.config.oauth_allowed_redirect_uris = oauth_redirect_uris
       McpToolkit.config.oauth_allow_loopback_redirects = oauth_allow_native
       McpToolkit.config.token_authenticator = token_authenticator
+      McpToolkit.config.oauth_signing_secret = oauth_signing_secret
       recorder = route_recorder
       stub_const("Rails", Module.new)
       # The engine class body now also calls `config.to_prepare { ... }` (lazy
@@ -174,6 +188,15 @@ RSpec.describe "Mountable engine + gem controller" do
       it "draws the bridge's endpoints" do
         expect(route_recorder.drawn).to include(*oauth_routes)
       end
+
+      # Without this, Rails' optional `(.:format)` matches and
+      # `/mcp/oauth/authorize.json` reaches the action, finds no JSON template and
+      # 500s — an unauthenticated error for a format the bridge never speaks.
+      it "disables the format segment on every bridge endpoint" do
+        formats = oauth_routes.map { |verb, path, _| route_recorder.drawn_formats[[verb, path]] }
+
+        expect(formats).to all(be(false))
+      end
     end
 
     # Allowing native clients names who may receive a code just as an allowlist
@@ -196,6 +219,18 @@ RSpec.describe "Mountable engine + gem controller" do
 
       # Still an authority, so its introspection route is unaffected — it is only
       # the bridge that goes away.
+      it "still draws no OAuth bridge" do
+        expect(route_recorder.drawn).not_to include(*oauth_routes)
+      end
+    end
+
+    # Without a server-held secret the bridge cannot seal a code's payload, and
+    # must not fall back to sealing it with something weaker. A Rails host never
+    # sees this — it inherits secret_key_base.
+    context "when an authority has no signing secret to resolve" do
+      let(:oauth_redirect_uris) { ["https://client.example/callback"] }
+      let(:oauth_signing_secret) { nil }
+
       it "still draws no OAuth bridge" do
         expect(route_recorder.drawn).not_to include(*oauth_routes)
       end

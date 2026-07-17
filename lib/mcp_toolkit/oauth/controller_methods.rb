@@ -35,6 +35,10 @@ module McpToolkit::Oauth::ControllerMethods
   # reason these need no allowlist entry.
   LOOPBACK_HOSTS = ["127.0.0.1", "::1", "localhost"].freeze
 
+  # Query parameters the callback response owns: whatever a client put in its own
+  # redirect_uri, these are set by the redirect and not carried over from it.
+  RESPONSE_OWNED_QUERY_KEYS = %w[code state].freeze
+
   included do
     # Safe to disable: the token endpoint is called server-to-server without a CSRF
     # token, and `approve` never acts on ambient authority — it reads no session and
@@ -42,6 +46,15 @@ module McpToolkit::Oauth::ControllerMethods
     # leg does SET a session cookie, because `form_tag` emits an authenticity
     # token; nothing ever reads it back.)
     protect_from_forgery with: :null_session if respond_to?(:protect_from_forgery)
+
+    # A before_action, not a guard clause in each action, because a callback runs
+    # even when the action itself does not. `authorize` is a common enough method
+    # name that a gem patching ActionController::Base with one would knock this
+    # action out of Rails' `action_methods` — and Rails would then serve
+    # `authorize.html.erb` by implicit render, skipping a body guard entirely and
+    # showing an attacker's `redirect_uri` a paste page. Here the check cannot be
+    # routed around.
+    before_action :mcp_oauth_validate_request!, only: %i[authorize approve] if respond_to?(:before_action)
   end
 
   # `resource` MUST equal the MCP endpoint URL as the operator typed it into the
@@ -83,18 +96,12 @@ module McpToolkit::Oauth::ControllerMethods
   end
 
   def authorize
-    problem = mcp_oauth_request_problem
-    return mcp_oauth_render_bad_request(problem) if problem
-
     render :authorize, layout: false
   end
 
   # The token is verified here, not only at exchange, so a typo fails on the page
   # the operator is looking at.
   def approve
-    problem = mcp_oauth_request_problem
-    return mcp_oauth_render_bad_request(problem) if problem
-
     access_token = params[:access_token].to_s
     return mcp_oauth_reject_paste if mcp_oauth_authenticate(access_token).nil?
 
@@ -129,8 +136,14 @@ module McpToolkit::Oauth::ControllerMethods
 
   # ---- request validation ---------------------------------------------------
 
-  # Both problems render rather than bounce an OAuth error back to the caller: a
-  # disallowed redirect_uri must never be redirected TO — that is the attack.
+  # Halts both legs before their action runs. Both problems RENDER rather than
+  # bounce an OAuth error back to the caller: a disallowed redirect_uri must never
+  # be redirected TO — that is the attack.
+  def mcp_oauth_validate_request!
+    problem = mcp_oauth_request_problem
+    mcp_oauth_render_bad_request(problem) if problem
+  end
+
   def mcp_oauth_request_problem
     return mcp_oauth_reject_redirect_uri unless mcp_oauth_redirect_uri_allowed?
     return "Missing or unsupported PKCE code_challenge." unless mcp_oauth_code_challenge_supported?
@@ -212,14 +225,11 @@ module McpToolkit::Oauth::ControllerMethods
   # The whole "authorization server" state: one cache entry, short-lived, bound
   # to the challenge and redirect it was issued for.
   #
-  # The entry is keyed by the code's DIGEST and its payload is encrypted under a
-  # key derived from the code itself, so the cache holds nothing usable on its
-  # own. That is worth the few lines here because the value is not the short-lived
-  # credential an authorization server would normally park: it is the operator's
-  # pre-existing, long-lived, full-scope token, and `cache_store` is documented
-  # to be the host's shared `Rails.cache`. A dump of that store — a Redis
-  # snapshot, a FileStore on disk — now yields ciphertext whose key never landed
-  # in it.
+  # The entry is keyed by the code's DIGEST and its payload is sealed, so a dump
+  # of the store yields nothing on its own. Worth the few lines because what is
+  # parked there is not the short-lived credential an authorization server would
+  # normally hold: it is the operator's pre-existing, long-lived, full-scope
+  # token, in a store a host is told to point at its shared `Rails.cache`.
   def mcp_oauth_issue_code(access_token)
     code = SecureRandom.urlsafe_base64(CODE_BYTES)
     payload = {
@@ -259,15 +269,39 @@ module McpToolkit::Oauth::ControllerMethods
     "#{CODE_CACHE_PREFIX}#{Digest::SHA256.hexdigest(code)}"
   end
 
-  # The code is 256 bits of `SecureRandom`, so a digest is already a uniform
-  # 256-bit key — the password-stretching a KDF would add buys nothing here and
-  # would cost a PBKDF2 run per request. Cipher and serializer are pinned rather
-  # than inherited: the gem supports ActiveSupport >= 6.1, where the defaults for
-  # both are Rails-configuration-dependent.
+  # Keyed on a SERVER-HELD secret as well as the code, and that is the whole
+  # point: deriving from the code alone made the code the entire secret, and the
+  # code is not one. Rails logs it twice per flow at INFO — `Redirected to
+  # ...?code=...` (only `config.filter_redirect` touches that line) and the token
+  # endpoint's `Parameters:` (no stock `filter_parameters` entry matches `code`)
+  # — so an artifact that is more widely read, longer retained and more
+  # replicated than a 60-second cache entry was carrying the key to it. Mixing in
+  # `oauth_signing_secret` means the cache, the logs and the code together still
+  # open nothing without a secret that lives in ENV and is never logged.
+  #
+  # HMAC rather than a bare digest because two independent inputs are being
+  # combined and HMAC is what does that safely. No password-stretching: both
+  # inputs are already high-entropy (a 256-bit `SecureRandom` code, a real
+  # `secret_key_base`), so a PBKDF2 run per request would buy nothing.
+  #
+  # Cipher AND serializer are pinned rather than inherited — the gem supports
+  # ActiveSupport >= 6.1, where both defaults are Rails-configuration-dependent.
+  # The serializer especially: every default in that range (`:marshal`, and
+  # 7.1+'s `:json_allow_marshal`) reaches `Marshal.load`, so a host with cache
+  # write access forging one blob would get remote code execution. The payload is
+  # already a JSON String, so NullSerializer is exactly right and JSON.parse ends
+  # up the only parser that ever sees it.
   def mcp_oauth_encryptor(code)
+    key = OpenSSL::HMAC.digest("SHA256", mcp_oauth_signing_secret, "#{CODE_CACHE_PREFIX}key:#{code}")
     ActiveSupport::MessageEncryptor.new(
-      Digest::SHA256.digest("#{CODE_CACHE_PREFIX}key:#{code}"), cipher: "aes-256-gcm"
+      key, cipher: "aes-256-gcm", serializer: ActiveSupport::MessageEncryptor::NullSerializer
     )
+  end
+
+  def mcp_oauth_signing_secret
+    mcp_oauth_config.oauth_signing_secret.tap do |secret|
+      raise McpToolkit::Errors::ConfigurationError, "oauth_signing_secret is not configured" if secret.to_s.empty?
+    end
   end
 
   def mcp_oauth_exchange_valid?(payload)
@@ -312,15 +346,38 @@ module McpToolkit::Oauth::ControllerMethods
     "#{mcp_oauth_resource_url}/oauth/#{action}"
   end
 
-  # Appends `code` (and echoes `state`) onto the client's redirect_uri, preserving
-  # any query it already carries.
+  # Sets `code` (and echoes `state`) on the client's redirect_uri, preserving any
+  # other query it already carries.
+  #
+  # SETS, not appends: a loopback redirect_uri is not an exact-matched string, so
+  # a caller can put `?code=…` in it themselves. Appending would emit
+  # `?code=theirs&code=ours` and leave which one wins to the client's parser.
+  # Dropping any inbound `code`/`state` keeps the response OAuth-shaped whatever
+  # was passed in.
+  #
+  # Built by string, not by `URI#query=`: the value here has already been checked
+  # by the redirect policy, and re-parsing it to reconstruct it only invents ways
+  # for the emitted URL to differ from the one that was approved — `URI#query=`
+  # also raises outright on an opaque URI (`com.example.app:cb`), which a host may
+  # legitimately allowlist.
   def mcp_oauth_callback_url(code)
-    uri = URI.parse(params[:redirect_uri].to_s)
-    query = URI.decode_www_form(uri.query.to_s)
-    query << ["code", code]
-    query << ["state", params[:state].to_s] if params[:state].present?
-    uri.query = URI.encode_www_form(query)
-    uri.to_s
+    redirect_uri = params[:redirect_uri].to_s
+    base, _, existing = redirect_uri.partition("?")
+    pairs = mcp_oauth_preserved_query_pairs(existing)
+    pairs << ["code", code]
+    pairs << ["state", params[:state].to_s] if params[:state].present?
+    "#{base}?#{URI.encode_www_form(pairs)}"
+  end
+
+  # A client's own query survives; the two parameters this response owns do not,
+  # whoever put them there. Malformed escapes are dropped rather than raised on —
+  # the alternative is a 500 after the operator has already pasted their token.
+  def mcp_oauth_preserved_query_pairs(query)
+    return [] if query.empty?
+
+    URI.decode_www_form(query).reject { |pair| RESPONSE_OWNED_QUERY_KEYS.include?(pair.first) }
+  rescue ArgumentError
+    []
   end
 
   # ---- responses ------------------------------------------------------------
@@ -340,10 +397,11 @@ module McpToolkit::Oauth::ControllerMethods
   # sent to and are built from the live request origin (`request.base_url`, which
   # honours `X-Forwarded-Host`), so a shared cache that stored one keyed only by
   # path could serve every client an origin an attacker chose — with the document
-  # itself vouching for it. Deployments are expected to pin `config.hosts` (Rails'
-  # HostAuthorization then rejects a forged header before it reaches here), but a
-  # metadata document is exactly the thing that must not be a shared cache's to
-  # hold, whether or not that is configured.
+  # itself vouching for it. A host MUST pin `config.hosts` — Rails'
+  # HostAuthorization then rejects a forged header before it reaches here, but
+  # Rails does NOT do that for you: `config.hosts` is populated in development and
+  # left EMPTY in production, where an empty list means no checking at all. This
+  # header is the half that does not depend on the host getting that right.
   def mcp_oauth_forbid_caching
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"

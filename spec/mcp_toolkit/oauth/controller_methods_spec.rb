@@ -4,11 +4,27 @@ require "spec_helper"
 
 # The OAuth bridge concern runs WITHOUT Rails in the gem's suite, so this drives it
 # against a minimal host class providing only the surface it touches: params,
-# request origin, render and redirect_to. before_actions are not auto-run (there is
-# no filter runner), which is fine — the bridge has none; each action guards itself.
+# request origin, render, redirect_to — and a before_action chain, since the two
+# browser legs are guarded by one and a fake that silently dropped it would let
+# every example here pass while the guard was gone. Drive an action via
+# `dispatch`, never by calling it directly, or the filters are skipped.
 RSpec.describe McpToolkit::Oauth::ControllerMethods do
   let(:controller_class) do
     Class.new do
+      # A minimal before_action chain, because the concern now guards the two
+      # browser legs with one and a callback that never runs would let every
+      # example below pass for the wrong reason. Records the registrations, then
+      # `dispatch` runs them and halts on a render — the two properties of the
+      # real chain these specs depend on. (Real Rails still adjudicates it: the
+      # end-to-end spec drives an actual filter chain.)
+      def self.before_action(name, only: nil)
+        registered_filters << [name, Array(only).map(&:to_sym)]
+      end
+
+      def self.registered_filters
+        @registered_filters ||= []
+      end
+
       include McpToolkit::Oauth::ControllerMethods
 
       attr_accessor :params
@@ -16,6 +32,17 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
 
       def initialize
         @params = {}
+      end
+
+      # The action, with its filters — what a request actually does.
+      def dispatch(action)
+        self.class.registered_filters.each do |name, only|
+          next unless only.empty? || only.include?(action)
+
+          send(name)
+          return nil if @rendered || @redirected_to # a filter halted the chain
+        end
+        send(action)
       end
 
       def request
@@ -59,6 +86,10 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       c.server_name = "example-mcp"
       c.oauth_allowed_redirect_uris = [redirect_uri]
       c.token_authenticator = ->(plaintext) { plaintext == valid_token ? principal : nil }
+      # Set explicitly because this suite runs without Rails, so the default
+      # (`Rails.application.secret_key_base`) has nothing to resolve against —
+      # exactly what a non-Rails host faces.
+      c.oauth_signing_secret = "spec-oauth-signing-secret"
     end
   end
 
@@ -75,7 +106,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   # Runs the authorize + approve legs and returns the issued code.
   def issue_code(overrides = {})
     controller.params = authorize_params(overrides).merge(access_token: valid_token)
-    controller.approve
+    controller.dispatch(:approve)
     URI.decode_www_form(URI.parse(controller.redirected_to[:url]).query).to_h["code"]
   end
 
@@ -182,7 +213,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   describe "#authorize" do
     it "renders the paste page for a well-formed request" do
       controller.params = authorize_params
-      controller.authorize
+      controller.dispatch(:authorize)
 
       expect(controller.rendered).to include(template: :authorize)
       expect(controller.rendered[:options]).to include(layout: false)
@@ -190,7 +221,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
 
     it "refuses an unregistered redirect_uri rather than redirecting to it" do
       controller.params = authorize_params(redirect_uri: "https://attacker.example/steal")
-      controller.authorize
+      controller.dispatch(:authorize)
 
       expect(controller.rendered[:options]).to include(status: :bad_request)
       expect(controller.redirected_to).to be_nil
@@ -203,7 +234,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       logger = instance_double(Logger, warn: nil)
       McpToolkit.config.logger = logger
       controller.params = authorize_params(redirect_uri: "https://client.example/callback/")
-      controller.authorize
+      controller.dispatch(:authorize)
 
       expect(logger).to have_received(:warn).with(
         a_string_including("https://client.example/callback/").and(a_string_including(redirect_uri))
@@ -212,14 +243,14 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
 
     it "refuses a request with no PKCE challenge" do
       controller.params = authorize_params(code_challenge: nil)
-      controller.authorize
+      controller.dispatch(:authorize)
 
       expect(controller.rendered[:options]).to include(status: :bad_request)
     end
 
     it "refuses a downgraded (plain) PKCE method" do
       controller.params = authorize_params(code_challenge_method: "plain")
-      controller.authorize
+      controller.dispatch(:authorize)
 
       expect(controller.rendered[:options]).to include(status: :bad_request)
     end
@@ -232,7 +263,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   describe "loopback redirect targets" do
     def authorize_with(uri)
       controller.params = authorize_params(redirect_uri: uri)
-      controller.authorize
+      controller.dispatch(:authorize)
       controller.rendered
     end
 
@@ -304,7 +335,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       it "hands a code to a loopback client through the full flow" do
         loopback_uri = "http://127.0.0.1:54321/cb"
         controller.params = authorize_params(redirect_uri: loopback_uri).merge(access_token: valid_token)
-        controller.approve
+        controller.dispatch(:approve)
 
         expect(controller.redirected_to[:url]).to start_with("#{loopback_uri}?code=")
       end
@@ -315,10 +346,40 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
         scheme_uri = "cursor://anysphere.cursor-retrieval/oauth/callback"
         McpToolkit.config.oauth_allowed_redirect_uris = [scheme_uri]
         controller.params = authorize_params(redirect_uri: scheme_uri).merge(access_token: valid_token)
-        controller.approve
+        controller.dispatch(:approve)
 
         expect(controller.redirected_to[:url]).to start_with("#{scheme_uri}?code=")
       end
+    end
+  end
+
+  # A bad entry here would otherwise surface at the worst possible moment: the
+  # page renders, the operator pastes a live token, a code is cached — and only
+  # then does building the callback URL raise. Same reasoning (and same shape) as
+  # `filter_operator_overrides=`.
+  describe "allowlist validation at config time" do
+    def assign(uri)
+      McpToolkit.config.oauth_allowed_redirect_uris = [uri]
+    end
+
+    it "accepts the shapes a real client registers" do
+      ["https://client.example/callback", "cursor://anysphere.cursor-retrieval/oauth/callback",
+       "com.example.app:/oauth2redirect", "http://127.0.0.1:1/cb?tenant=acme"].each do |uri|
+        expect { assign(uri) }.not_to raise_error
+      end
+    end
+
+    # The sharp one: legal URI syntax, invited by the docs, and it cannot carry a
+    # query — so no code could ever reach it.
+    it "rejects an opaque uri, naming the fix" do
+      expect { assign("com.example.app:oauth2redirect") }
+        .to raise_error(ArgumentError, /opaque.*com\.example\.app:\/oauth2redirect/m)
+    end
+
+    it "rejects entries the bridge could never redirect to" do
+      expect { assign("https://client.example/cb#frag") }.to raise_error(ArgumentError, /fragment/)
+      expect { assign("/just/a/path") }.to raise_error(ArgumentError, /names no scheme/)
+      expect { assign("ht tp://nonsense") }.to raise_error(ArgumentError, /not a valid URI/)
     end
   end
 
@@ -338,7 +399,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
     # browser unambiguously to GET the callback without resending it.
     it "redirects with 303 after the credential POST, not 302" do
       controller.params = authorize_params.merge(access_token: valid_token)
-      controller.approve
+      controller.dispatch(:approve)
 
       expect(controller.redirected_to[:options]).to include(status: :see_other)
     end
@@ -347,7 +408,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   describe "#approve" do
     it "redirects to the client with a code and the echoed state" do
       controller.params = authorize_params.merge(access_token: valid_token)
-      controller.approve
+      controller.dispatch(:approve)
 
       redirect = URI.parse(controller.redirected_to[:url])
       query = URI.decode_www_form(redirect.query).to_h
@@ -361,7 +422,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       with_query = "#{redirect_uri}?tenant=acme"
       McpToolkit.config.oauth_allowed_redirect_uris = [with_query]
       controller.params = authorize_params(redirect_uri: with_query).merge(access_token: valid_token)
-      controller.approve
+      controller.dispatch(:approve)
 
       query = URI.decode_www_form(URI.parse(controller.redirected_to[:url]).query).to_h
       expect(query["tenant"]).to eq("acme")
@@ -370,7 +431,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
 
     it "re-renders the page with an error for an unknown token, without issuing a code" do
       controller.params = authorize_params.merge(access_token: "not-a-real-token")
-      controller.approve
+      controller.dispatch(:approve)
 
       expect(controller.redirected_to).to be_nil
       expect(controller.rendered).to include(template: :authorize)
@@ -379,7 +440,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
 
     it "re-renders the page when no token was pasted" do
       controller.params = authorize_params.merge(access_token: "")
-      controller.approve
+      controller.dispatch(:approve)
 
       expect(controller.redirected_to).to be_nil
       expect(controller.rendered[:options]).to include(status: :unprocessable_content)
@@ -390,7 +451,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
     it "refuses a redirect_uri swapped between the two legs" do
       controller.params = authorize_params(redirect_uri: "https://attacker.example/steal")
                           .merge(access_token: valid_token)
-      controller.approve
+      controller.dispatch(:approve)
 
       expect(controller.redirected_to).to be_nil
       expect(controller.rendered[:options]).to include(status: :bad_request)
@@ -526,6 +587,39 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       controller.token
 
       expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
+    end
+
+    # The code is NOT the key. It cannot be: Rails logs an authorization code
+    # twice per flow at INFO, so a key derived from it alone would be sitting in
+    # the log — the one artifact more widely read and longer kept than the 60s
+    # entry it protects. Knowing the code must not be enough.
+    it "does not open the payload to someone who has the code but not the secret" do
+      code = issue_code
+      blob = cached_values.first
+
+      derived_from_code_alone = ActiveSupport::MessageEncryptor.new(
+        Digest::SHA256.digest("#{described_class::CODE_CACHE_PREFIX}key:#{code}"), cipher: "aes-256-gcm"
+      )
+      expect { derived_from_code_alone.decrypt_and_verify(blob) }
+        .to raise_error(ActiveSupport::MessageEncryptor::InvalidMessage)
+    end
+
+    it "refuses to issue a code at all once the signing secret is gone" do
+      McpToolkit.config.oauth_signing_secret = nil
+
+      expect { issue_code }.to raise_error(McpToolkit::Errors::ConfigurationError, /oauth_signing_secret/)
+    end
+
+    # Every serializer ActiveSupport defaults to across the supported range
+    # (:marshal, and 7.1+'s :json_allow_marshal) reaches Marshal.load, so a host
+    # with cache-write access forging one blob would get code execution. Pinning
+    # NullSerializer means JSON.parse is the only parser that ever sees it.
+    it "never hands the stored payload to Marshal" do
+      issue_code
+      encryptor = controller.send(:mcp_oauth_encryptor, "any-code")
+
+      expect(encryptor.instance_variable_get(:@serializer))
+        .to be(ActiveSupport::MessageEncryptor::NullSerializer)
     end
   end
 

@@ -133,9 +133,22 @@ class McpToolkit::Configuration
   # itself — an attacker sends the operator an authorize link carrying the
   # attacker's `code_challenge`, the operator pastes, and the code goes to the
   # attacker, who redeems it with the verifier they chose. PKCE cannot help; they
-  # own the verifier. A real authorization server blocks this with a consent
-  # screen naming the client plus an authenticated session. This bridge mocks both
-  # away, and this allowlist is what compensates.
+  # own the verifier. This list IS the redirect-URI registration a real
+  # authorization server does, and it is the only thing standing in for it.
+  #
+  # Be precise about what it does NOT cover, because the boundary is easy to
+  # overstate. It binds which URL a code may be sent to — not whose session at
+  # that URL receives it. Point it at a MULTI-TENANT client (which is the usual
+  # case: a hosted MCP client is one callback shared by every user) and an
+  # attacker can still start a flow in their OWN account there, send the operator
+  # the resulting authorize link, and have the code land back at that client
+  # carrying the attacker's `state`. Whether the operator's token then ends up in
+  # the attacker's account is decided entirely by whether the CLIENT binds
+  # `state` to the browser session that began the flow (RFC 6819 §4.4.1.7; RFC
+  # 9700 §4.7.1) — an authorization server cannot bind a code to a session it
+  # never saw, so no amount of consent or authentication here would close it. A
+  # real authorization server has exactly the same exposure. Only allowlist
+  # clients you believe handle `state` correctly.
   #
   # EMPTY BY DEFAULT. Empty, and with `oauth_allow_loopback_redirects` off,
   # the bridge is DISABLED entirely (see `oauth_bridge?`) — so it cannot be
@@ -145,7 +158,32 @@ class McpToolkit::Configuration
   #   c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
   #
   # @return [Array<String>]
-  attr_accessor :oauth_allowed_redirect_uris
+  attr_reader :oauth_allowed_redirect_uris
+
+  # Assigns the allowlist, rejecting an entry the bridge could not actually
+  # redirect to. Validated at CONFIG time for the same reason
+  # `filter_operator_overrides=` is: the alternative is a request-time failure,
+  # and here that failure lands at the worst possible moment — the authorize page
+  # renders, the operator pastes a live token, the token is verified, a code is
+  # written to the cache, and only THEN does building the callback URL raise. A
+  # typo would cost the operator their paste and leave an orphaned code behind.
+  #
+  # Rejected: anything unparseable, anything with no scheme (a bare path is not a
+  # redirect target), a fragment (OAuth forbids one on a redirect_uri), and an
+  # OPAQUE URI — `com.example.app:cb` rather than `com.example.app:/cb`. The last
+  # is the sharp one, because the docs actively invite private-use schemes into
+  # this list and the opaque form is legal URI syntax; it simply cannot carry a
+  # query, so no code could ever reach it.
+  def oauth_allowed_redirect_uris=(uris)
+    @oauth_allowed_redirect_uris = Array(uris).map(&:to_s).each do |uri|
+      problem = oauth_redirect_uri_problem(uri)
+      next unless problem
+
+      raise ArgumentError,
+            "oauth_allowed_redirect_uris contains #{uri.inspect}, which the bridge could never redirect to: " \
+            "#{problem}"
+    end
+  end
 
   # Permits LOOPBACK redirect targets on any port without naming each one:
   # `http://127.0.0.1:54321/cb`, `http://localhost:*/cb`, `http://[::1]:*/cb`.
@@ -197,6 +235,39 @@ class McpToolkit::Configuration
   #
   # @return [Integer]
   attr_accessor :oauth_authorization_code_ttl
+
+  # The server-held secret mixed into the key that seals a cached authorization
+  # code's payload (McpToolkit::Oauth::ControllerMethods#mcp_oauth_encryptor).
+  #
+  # It exists because the code alone must NOT be the key: Rails logs an
+  # authorization code twice per flow at INFO, so the logs would otherwise carry
+  # the key to the cache entry. This secret never reaches a log or a response, so
+  # the cache and the logs together still open nothing without it.
+  #
+  # Defaults to the Rails app's `secret_key_base` (lazily, so load order and a
+  # non-Rails host are both fine), which is exactly the "server-held, in ENV,
+  # never logged" property wanted — so a Rails host configures nothing. A
+  # non-Rails host MUST set it; the bridge refuses to run without one
+  # (`oauth_bridge?`), rather than silently sealing with a weak key.
+  #
+  #   c.oauth_signing_secret = ENV.fetch("MCP_OAUTH_SIGNING_SECRET")
+  #
+  # Rotating it invalidates in-flight codes (a 60s window), nothing else — the
+  # tokens themselves are the host's and are untouched.
+  #
+  # @return [String, nil]
+  attr_writer :oauth_signing_secret
+
+  # Reads the configured secret, else the Rails app's `secret_key_base`. Resolved
+  # lazily rather than in the initializer: the gem loads before a Rails app is
+  # fully configured, and a non-Rails host has no `Rails` constant at all.
+  def oauth_signing_secret
+    return @oauth_signing_secret if @oauth_signing_secret
+
+    return nil unless defined?(::Rails) && ::Rails.respond_to?(:application) && ::Rails.application
+
+    ::Rails.application.secret_key_base
+  end
 
   # The parent class of the bridge's controller, SEPARATE from
   # `parent_controller` and defaulting to ActionController::Base.
@@ -569,6 +640,7 @@ class McpToolkit::Configuration
     @oauth_resource_path = "/mcp"
     @oauth_authorization_code_ttl = 60
     @oauth_parent_controller = "ActionController::Base"
+    @oauth_signing_secret = nil # falls back to Rails' secret_key_base — see the reader
   end
 
   # Session-TTL and list-executor defaults: the :tokenized / :created_at
@@ -733,17 +805,61 @@ class McpToolkit::Configuration
   # token and then errors — the sibling introspection endpoint fails safe the
   # same way.
   #
+  # An `oauth_signing_secret` must resolve, for the same reason: without one the
+  # bridge cannot seal a code's payload, and it must not fall back to sealing
+  # with something weaker. A Rails host gets `secret_key_base` for free.
+  #
   # And at least one redirect target must be named — an allowlist entry, or the
-  # native-client switch — so the bridge cannot be running without a bound
-  # answer to "who may receive a code". Both are empty/off by default, which is
-  # what makes an unconfigured host byte-identical to one without the bridge.
+  # loopback switch — so the bridge cannot be running without a bound answer to
+  # "who may receive a code". Both are empty/off by default, which is what makes
+  # an unconfigured host byte-identical to one without the bridge.
+  #
+  # NOT gated on a shared `cache_store`, deliberately, even though a per-worker
+  # one breaks the flow (see `oauth_per_process_cache_store?`): a MemoryStore is
+  # correct in a single process, `Rails.cache` IS a MemoryStore in a stock
+  # development environment, and the gem cannot see the worker count. Gating
+  # would make the bridge undevelopable locally to prevent a production mistake,
+  # so that one is a loud warning at boot instead.
   #
   # @return [Boolean]
   def oauth_bridge?
     return false unless authority?
     return false if token_authenticator.nil?
+    return false if oauth_signing_secret.to_s.empty?
 
     Array(oauth_allowed_redirect_uris).any? || !!oauth_allow_loopback_redirects
+  end
+
+  # Why a given allowlist entry could never receive a code, or nil if it could.
+  def oauth_redirect_uri_problem(uri)
+    parsed = oauth_parse_redirect_uri(uri)
+    return "it is not a valid URI" if parsed.nil?
+
+    return "it names no scheme" if parsed.scheme.nil?
+    return "it carries a fragment, which OAuth forbids on a redirect_uri" unless parsed.fragment.nil?
+    return nil if parsed.opaque.nil?
+
+    "it is opaque (#{parsed.scheme}:#{parsed.opaque}) so it cannot carry the code — " \
+      "write it with a path, e.g. #{parsed.scheme}:/#{parsed.opaque}"
+  end
+
+  def oauth_parse_redirect_uri(uri)
+    URI.parse(uri)
+  rescue URI::InvalidURIError
+    nil
+  end
+
+  # Whether `cache_store` is per-process, which the bridge cannot survive on a
+  # multi-worker deployment: a code written on the worker that ran leg 1 is
+  # invisible to the worker that runs leg 2, so the exchange reads nil and
+  # answers `invalid_grant` — roughly (N-1)/N of the time, AFTER the operator has
+  # pasted a live token, and intermittently enough to read as a fluke rather than
+  # a misconfiguration. (It also quietly voids the payload sealing: a per-process
+  # store has no snapshot to steal, and its key would be in the same heap.)
+  #
+  # Fine in one process, which is why this warns rather than gates.
+  def oauth_per_process_cache_store?
+    cache_store.is_a?(ActiveSupport::Cache::MemoryStore)
   end
 
   # Full introspection URL the satellite POSTs to. Raises a clear error if the

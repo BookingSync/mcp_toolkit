@@ -76,11 +76,14 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   the path-INSERTED URLs with no root fallback — so the issuer is the MCP endpoint
   URL itself. A host mounted AT its origin root has no path to insert and gets the
   bare paths, which is correct there.
-- `config.oauth_allowed_redirect_uris` (default `[]`),
-  `config.oauth_allow_loopback_redirects` (default `false`),
+- `config.oauth_allowed_redirect_uris` (default `[]`; entries are validated at
+  assignment — an unparseable, scheme-less, fragment-bearing or *opaque* URI
+  raises, because the alternative is a 500 after the operator has already pasted
+  their token), `config.oauth_allow_loopback_redirects` (default `false`),
   `config.oauth_resource_path` (default `"/mcp"` — must match the engine's mount
-  point), `config.oauth_authorization_code_ttl` (default `60`), and
-  `config.oauth_parent_controller` (default `"ActionController::Base"`).
+  point), `config.oauth_authorization_code_ttl` (default `60`),
+  `config.oauth_signing_secret` (defaults to the Rails app's `secret_key_base`),
+  and `config.oauth_parent_controller` (default `"ActionController::Base"`).
 - `config.oauth_bridge?` — whether the bridge is live. Gated on the authority role;
   on a `token_authenticator` being set, since the bridge verifies the pasted token
   through it on both legs and drawing no route beats an authorization page that
@@ -107,15 +110,31 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
 ### Notes
 
 - **An authorization code leaves nothing usable in the cache.** The entry is keyed
-  by the code's SHA256 and its payload is sealed with `MessageEncryptor` under a
-  key derived from the code, which never itself lands in the store — so a dump of
-  it (a Redis snapshot, a FileStore on disk) yields ciphertext with no key, and a
-  payload swapped in a writable cache does not decrypt. Worth the few lines because
-  what is parked there for the code's lifetime is not the short-lived credential an
-  authorization server would normally hold: it is the operator's pre-existing,
-  long-lived, full-scope token, and `cache_store` is documented to be the host's
-  shared `Rails.cache`. Codes are also single-use by the DELETE rather than the
-  read, so of two concurrent redemptions exactly one proceeds.
+  by the code's SHA256, and its payload is sealed with `MessageEncryptor`
+  (AES-256-GCM) under a key HMAC'd from `config.oauth_signing_secret` **and** the
+  code. Worth the few lines because what is parked there for the code's lifetime
+  is not the short-lived credential an authorization server would normally hold:
+  it is the operator's pre-existing, long-lived, full-scope token, in a store
+  hosts are told to point at their shared `Rails.cache`.
+
+  The secret is in the key for a specific reason: **the code alone must not be
+  it.** Rails logs an authorization code twice per flow at INFO — `Redirected to
+  ...?code=...` (only `config.filter_redirect` touches that line) and the token
+  endpoint's `Parameters:` (no stock `filter_parameters` entry matches `code`) —
+  so keying on the code alone would leave the key to the cache sitting in the one
+  artifact that is more widely read, longer retained and more replicated than the
+  60-second entry it protects. With the secret mixed in, the cache, the logs and
+  the code together still open nothing.
+
+  The serializer is pinned to `NullSerializer` for a similar reason: every
+  ActiveSupport default across the supported range (`:marshal`, and 7.1+'s
+  `:json_allow_marshal`) reaches `Marshal.load`, so a host with cache-write access
+  forging one blob would have had code execution. `JSON.parse` is now the only
+  parser that sees the payload.
+
+  Codes are also single-use by the DELETE rather than the read, so of two
+  concurrent redemptions exactly one proceeds (verified on MemoryStore, Redis and
+  MemCache stores).
 - The bridge's controller is built from its own `config.oauth_parent_controller`
   rather than the `parent_controller` the transport uses. The transport is a
   JSON-only endpoint whose parent is typically `ActionController::API`, which
@@ -126,6 +145,22 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
 - If a host logs request parameters, add `code_verifier` to
   `config.filter_parameters`; `access_token` is already covered by the stock
   `token` entry Rails ships.
+- **A host MUST pin `config.hosts`.** Every identifier the bridge publishes is
+  derived from `request.base_url`, which honours `X-Forwarded-Host`. Rails does
+  not pin it for you — it populates `config.hosts` in development and leaves it
+  empty in production, where empty means no host checking at all.
+- **A host MUST point `config.cache_store` at a shared store** before running the
+  bridge on more than one worker. The default is an in-process MemoryStore, which
+  cannot carry a code from the worker that issued it to the worker that redeems
+  it: the flow then fails roughly (N-1)/N of the time, intermittently, and only
+  after the operator has pasted a live token. Warned about once at boot rather
+  than gated, because a MemoryStore is correct in a single process and
+  `Rails.cache` IS one in a stock development environment.
+- The bridge's two browser legs are guarded by a `before_action` rather than a
+  check inside each action, so the guard cannot be routed around: `authorize` is
+  a common method name, and a gem defining one on `ActionController::Base` would
+  drop the action from Rails' `action_methods` and have Rails serve the template
+  by implicit render — skipping a guard that lived in the body.
 - A host restyles the page by defining its own
   `app/views/mcp_toolkit/oauth/authorize.html.erb`, which takes precedence over the
   engine's.

@@ -111,7 +111,27 @@ module McpToolkit
   # to weaken its transport's superclass just to enable the bridge. Read lazily
   # here, like the rest, so the host's initializer/to_prepare has already run.
   def self.build_oauth_controller
+    warn_about_per_process_cache_store
     Class.new(config.oauth_parent_controller.constantize) { include McpToolkit::Oauth::ControllerMethods }
+  end
+
+  # Said once per boot (this runs from the engine's `to_prepare`), because the
+  # failure it predicts is otherwise hard to read as a misconfiguration at all:
+  # with a per-process cache the two legs of a flow land on different workers, so
+  # the exchange fails (N-1)/N of the time — intermittently, and only AFTER the
+  # operator has already pasted a live token. A warning rather than a gate,
+  # because one process is genuinely fine and `Rails.cache` is a MemoryStore in a
+  # stock development environment.
+  def self.warn_about_per_process_cache_store
+    return unless config.oauth_per_process_cache_store?
+
+    config.logger&.warn(
+      "[mcp_toolkit] The OAuth bridge is enabled but config.cache_store is an in-process MemoryStore. " \
+      "That is safe in a single process only: on a multi-worker deployment an authorization code issued " \
+      "by one worker is invisible to the worker that redeems it, so the flow fails intermittently AFTER " \
+      "the operator has pasted their token. Point config.cache_store at a shared store (Rails.cache " \
+      "backed by Redis/Memcached) before running the bridge in production."
+    )
   end
 
   # The AUTHORITY base controller a host subclasses (the recommended path for a

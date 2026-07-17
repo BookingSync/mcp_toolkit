@@ -425,6 +425,12 @@ McpToolkit.configure do |c|
   c.auth_role = :authority
   c.token_authenticator = ->(plaintext) { AccessToken.authenticate(plaintext) }
 
+  # REQUIRED for the bridge on any multi-worker deployment. The default is an
+  # in-process MemoryStore, which cannot carry an authorization code from the
+  # worker that issues it to the worker that redeems it — the flow then fails
+  # intermittently, *after* the operator has pasted their token.
+  c.cache_store = Rails.cache
+
   # Naming who may receive an authorization code is what switches the bridge on.
   c.oauth_allowed_redirect_uris = ["https://client.example/callback"]
   c.oauth_resource_path = "/mcp" # must match the engine's mount point
@@ -499,12 +505,26 @@ Loopback is judged on the *parsed* URI, so `http://127.0.0.1@evil.example/` (hos
 `evil.example`) and `http://127.0.0.1.evil.example/` are both correctly seen as
 remote, and a fragment is refused.
 
+**What the allowlist does not cover.** It binds which URL a code may be sent to —
+not *whose session at that URL* receives it. A hosted MCP client is one callback
+shared by every one of its users, so an attacker can start a flow in their own
+account there, send an operator the resulting authorize link, and have the code
+land back at that client carrying the attacker's `state`. Whether the operator's
+token then ends up in the attacker's account is decided by whether **the client**
+binds `state` to the browser session that began the flow (RFC 6819 §4.4.1.7). An
+authorization server cannot bind a code to a session it never saw, so this is not
+something the bridge — or a full authorization server, which has the identical
+exposure — can close. **Only allowlist clients you believe handle `state`
+correctly.**
+
 ### Deployment note
 
 Every identifier the bridge publishes is derived from the live request origin
-(`request.base_url`), which honours `X-Forwarded-Host`. **Pin `config.hosts`** so
-Rails' `HostAuthorization` rejects a forged header before it reaches the bridge;
-Rails leaves it empty in production by default. Both metadata documents are served
+(`request.base_url`), which honours `X-Forwarded-Host`. **You MUST pin
+`config.hosts`** so Rails' `HostAuthorization` rejects a forged header before it
+reaches the bridge — Rails does *not* do this for you: it populates `config.hosts`
+in development and leaves it **empty in production**, where empty means no
+checking at all. Both metadata documents are served
 `Cache-Control: no-store` regardless, so no shared cache can hand one client an
 origin another client chose. If you log request parameters, add `code_verifier` to
 `config.filter_parameters` (`access_token` is already covered by the stock `token`

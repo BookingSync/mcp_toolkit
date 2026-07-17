@@ -130,6 +130,12 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     result["oauth_controller_parent"] = McpToolkit::OauthController.superclass.name
     result["server_controller_parent"] = McpToolkit::ServerController.superclass.name
 
+    # Nothing above configured a signing secret: on a Rails host it must resolve
+    # to secret_key_base by itself, or every host would have to wire one.
+    result["signing_secret_resolves_from_rails"] =
+      McpToolkit.config.oauth_signing_secret == app.secret_key_base
+    result["bridge_enabled"] = McpToolkit.config.oauth_bridge?
+
     # 1. An unauthenticated MCP call must point the client at the metadata.
     session.post("/mcp", JSON.generate({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
                  "CONTENT_TYPE" => "application/json")
@@ -256,6 +262,21 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       result[key] = session.last_response.status
     end
 
+    # 11. A format suffix must not reach the action: there is no JSON template, so
+    # it would 500 unauthenticated.
+    session.get("/mcp/oauth/authorize.json", authorize_query)
+    result["authorize_json_suffix_status"] = session.last_response.status
+
+    # 12. A loopback client controls its own query, so it can pass `?code=`. The
+    # response owns that parameter — ours must be the only one.
+    polluted = "http://127.0.0.1:54321/cb?code=ATTACKER&tenant=acme"
+    session.post("/mcp/oauth/authorize",
+                 authorize_query.merge(redirect_uri: polluted, access_token: VALID_TOKEN))
+    polluted_location = session.last_response.headers["Location"]
+    polluted_query = Rack::Utils.parse_query(URI.parse(polluted_location.to_s).query)
+    result["polluted_code_values"] = Array(polluted_query["code"])
+    result["polluted_keeps_client_query"] = polluted_query["tenant"]
+
     puts JSON.generate(result)
   RUBY
 
@@ -336,6 +357,33 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
 
     it "keeps a remote callback allowlist-only even with loopback allowed" do
       expect(@result.fetch("remote_unregistered_status")).to eq(400)
+    end
+  end
+
+  # A Rails host must not have to wire a signing secret: secret_key_base is
+  # already the "server-held, in ENV, never logged" value the sealing wants.
+  describe "the signing secret" do
+    it "resolves from the Rails app's secret_key_base with no configuration" do
+      expect(@result.fetch("signing_secret_resolves_from_rails")).to be(true)
+      expect(@result.fetch("bridge_enabled")).to be(true)
+    end
+  end
+
+  describe "request shapes that must not reach an action" do
+    it "does not serve a format suffix the bridge never speaks" do
+      expect(@result.fetch("authorize_json_suffix_status")).to eq(404)
+    end
+  end
+
+  # A loopback redirect_uri is not exact-matched, so its query is the caller's to
+  # choose. The parameters this response owns are not.
+  describe "a loopback redirect_uri carrying its own code" do
+    it "emits exactly one code, ours, and keeps the client's own query" do
+      codes = @result.fetch("polluted_code_values")
+
+      expect(codes.size).to eq(1)
+      expect(codes.first).not_to eq("ATTACKER")
+      expect(@result.fetch("polluted_keeps_client_query")).to eq("acme")
     end
   end
 
