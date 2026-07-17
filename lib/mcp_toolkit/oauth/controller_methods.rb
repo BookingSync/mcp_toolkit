@@ -35,14 +35,6 @@ module McpToolkit::Oauth::ControllerMethods
   # reason these need no allowlist entry.
   LOOPBACK_HOSTS = ["127.0.0.1", "::1", "localhost"].freeze
 
-  # Schemes that are never a private-use (native app) scheme: the web schemes,
-  # which travel to a remote host and so must be allowlisted; and the
-  # pseudo-schemes a browser may treat as script or local content, which have no
-  # business receiving an authorization code whatever a client claims.
-  RESERVED_REDIRECT_SCHEMES = %w[
-    http https ws wss ftp sftp file data javascript vbscript blob about view-source
-  ].freeze
-
   included do
     # Safe to disable: the token endpoint is called server-to-server without a CSRF
     # token, and `approve` never acts on ambient authority — it reads no session and
@@ -106,7 +98,13 @@ module McpToolkit::Oauth::ControllerMethods
     access_token = params[:access_token].to_s
     return mcp_oauth_reject_paste if mcp_oauth_authenticate(access_token).nil?
 
-    redirect_to mcp_oauth_callback_url(mcp_oauth_issue_code(access_token)), allow_other_host: true
+    # 303, not Rails' default 302: this POST carried the operator's token in its
+    # body, and only 303 unambiguously tells the browser to fetch the redirect
+    # target with GET and no body. A 302 leaves re-sending it to the client's
+    # discretion, which would hand the token itself to the callback (RFC 9700
+    # §4.12).
+    redirect_to mcp_oauth_callback_url(mcp_oauth_issue_code(access_token)),
+                allow_other_host: true, status: :see_other
   end
 
   def token
@@ -119,6 +117,7 @@ module McpToolkit::Oauth::ControllerMethods
     access_token = payload[:access_token].to_s
     return mcp_oauth_render_token_error("invalid_grant") if mcp_oauth_authenticate(access_token).nil?
 
+    mcp_oauth_forbid_caching
     render json: { access_token:, token_type: "Bearer" }
   end
 
@@ -146,46 +145,50 @@ module McpToolkit::Oauth::ControllerMethods
     mcp_oauth_config.logger&.warn(
       "[mcp_toolkit] OAuth authorize rejected: redirect_uri #{params[:redirect_uri].inspect} is not in " \
       "config.oauth_allowed_redirect_uris (#{Array(mcp_oauth_config.oauth_allowed_redirect_uris).inspect}) " \
-      "and is not a native-client target permitted by config.oauth_allow_native_client_redirects " \
-      "(#{mcp_oauth_config.oauth_allow_native_client_redirects ? "enabled" : "disabled"})"
+      "and is not a native-client target permitted by config.oauth_allow_loopback_redirects " \
+      "(#{mcp_oauth_config.oauth_allow_loopback_redirects ? "enabled" : "disabled"})"
     )
     "Unregistered redirect_uri."
   end
 
-  # A REMOTE target must be named exactly. A native one need not be — see
-  # `mcp_oauth_native_redirect_uri?` for why that is a difference in kind rather
-  # than a laxer rule.
+  # Every target must be named exactly, with ONE exception: loopback, whose port
+  # cannot be named ahead of time. See `mcp_oauth_loopback_redirect_uri?`.
   def mcp_oauth_redirect_uri_allowed?
     redirect_uri = params[:redirect_uri].to_s
     return false if redirect_uri.empty?
     return true if Array(mcp_oauth_config.oauth_allowed_redirect_uris).include?(redirect_uri)
 
-    mcp_oauth_native_redirect_uri?(redirect_uri)
+    mcp_oauth_loopback_redirect_uri?(redirect_uri)
   end
 
-  # RFC 8252 native-client targets: loopback on any port (§7.3, the port is
-  # ephemeral and cannot be registered ahead of time) and private-use schemes
-  # (§7.1). Both deliver the code to the operator's OWN device, which is what
-  # makes them safe to accept unnamed — the attack the allowlist exists to stop
-  # needs the code to reach a remote attacker.
+  # RFC 8252 §7.3 loopback: the ONLY target accepted without being named, because
+  # it is the only one that CANNOT be named — the client listens on an ephemeral
+  # port chosen at runtime, so no allowlist could enumerate it. That, and not
+  # "native clients are trusted", is the whole justification: an allowlist entry
+  # is impossible here and merely inconvenient everywhere else.
   #
-  # Everything is checked against the PARSED URI, never the string: `host` is
-  # what a browser resolves, so `http://127.0.0.1@evil.example/` (userinfo, host
-  # evil.example) and `http://127.0.0.1.evil.example/` are both correctly seen as
-  # remote. An opaque URI is refused because it cannot carry the code anyway
-  # (`URI#query=` raises on one), which also disposes of `javascript:alert(1)`;
-  # a fragment is refused because OAuth forbids one on a redirect_uri.
-  def mcp_oauth_native_redirect_uri?(redirect_uri)
-    return false unless mcp_oauth_config.oauth_allow_native_client_redirects
+  # A private-use scheme (`cursor://…`, §7.1) is deliberately NOT accepted here,
+  # even though it also keeps the code on the device. Its redirect URI is a fixed
+  # string, so it can simply go in `oauth_allowed_redirect_uris` — there is no
+  # forcing reason to accept it unnamed, and accepting whole SCHEMES generically
+  # cannot be done safely: the only way to separate a private-use scheme from a
+  # registered network one (`ssh:`, `ldap:`, `gopher:` — each naming a REMOTE
+  # host) is to enumerate the IANA registry, and a denylist of the ones you
+  # thought of is exactly the shape that fails open.
+  #
+  # Checked against the PARSED URI, never the string: `host` is what a browser
+  # resolves, so `http://127.0.0.1@evil.example/` (userinfo; host evil.example)
+  # and `http://127.0.0.1.evil.example/` are both correctly seen as remote. A
+  # fragment is refused because OAuth forbids one on a redirect_uri.
+  def mcp_oauth_loopback_redirect_uri?(redirect_uri)
+    return false unless mcp_oauth_config.oauth_allow_loopback_redirects
 
     uri = mcp_oauth_parse_uri(redirect_uri)
     return false if uri.nil?
+    return false unless %w[http https].include?(uri.scheme&.downcase)
+    return false unless uri.fragment.nil?
 
-    scheme = uri.scheme&.downcase
-    return false if scheme.nil? || !uri.opaque.nil? || !uri.fragment.nil?
-    return mcp_oauth_loopback_host?(uri.host) if %w[http https].include?(scheme)
-
-    !RESERVED_REDIRECT_SCHEMES.include?(scheme)
+    mcp_oauth_loopback_host?(uri.host)
   end
 
   def mcp_oauth_parse_uri(value)
@@ -331,17 +334,19 @@ module McpToolkit::Oauth::ControllerMethods
     render plain: message, status: :bad_request
   end
 
-  # Both metadata documents name the `authorization_endpoint` an operator will be
-  # sent to, and they are built from the live request origin (`request.base_url`,
-  # which honours `X-Forwarded-Host`). A shared cache that stored one keyed only
-  # by path could therefore serve every client an origin an attacker chose, and
-  # the document itself would be what vouches for it — the operator lands on the
-  # attacker's page and pastes a live token. Deployments are expected to pin
-  # `config.hosts` (Rails' HostAuthorization rejects a forged header before it
-  # reaches here), but a metadata document is exactly the thing that must not be
-  # a shared cache's to hold, whether or not that is configured.
+  # Applied to the token response, where RFC 6749 §5.1 makes both headers a MUST
+  # for anything carrying a token, and to both metadata documents, where the
+  # reason is subtler: they name the `authorization_endpoint` an operator will be
+  # sent to and are built from the live request origin (`request.base_url`, which
+  # honours `X-Forwarded-Host`), so a shared cache that stored one keyed only by
+  # path could serve every client an origin an attacker chose — with the document
+  # itself vouching for it. Deployments are expected to pin `config.hosts` (Rails'
+  # HostAuthorization then rejects a forged header before it reaches here), but a
+  # metadata document is exactly the thing that must not be a shared cache's to
+  # hold, whether or not that is configured.
   def mcp_oauth_forbid_caching
     response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
   end
 
   def mcp_oauth_render_token_error(code)

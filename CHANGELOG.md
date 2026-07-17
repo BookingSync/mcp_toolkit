@@ -31,18 +31,28 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   it makes the host's own domain a credential-phishing page: an attacker sends the
   operator an authorize link carrying the attacker's own `code_challenge`, the
   operator pastes, and the code is delivered to the attacker, who redeems it with
-  the verifier they chose. PKCE cannot help — they own the verifier. That attack
-  needs the code to reach a REMOTE attacker, which is what splits the policy in
-  two: a remote callback is matched by exact string against
-  `config.oauth_allowed_redirect_uris` and is never opened up, while RFC 8252
-  native targets — loopback on any port (§7.3, the port is ephemeral and cannot be
-  registered ahead of time) and private-use schemes (§7.1) — are permitted
-  generically by `config.oauth_allow_native_client_redirects`, because they deliver
-  the code to the operator's OWN machine. So every MCP client running on an
-  operator's machine works with no configuration, while a hosted client needs one
-  allowlist entry. Native targets are judged on the PARSED URI
-  (`http://127.0.0.1@evil.example/` has host `evil.example`, and is remote), and a
-  fragment, an opaque URI, or a `javascript:`/`data:`/`file:` scheme is refused.
+  the verifier they chose. PKCE cannot help — they own the verifier.
+
+  So every redirect target must be named by exact string in
+  `config.oauth_allowed_redirect_uris`, with exactly ONE exception:
+  **loopback** (`http://127.0.0.1:*`, `localhost`, `[::1]`), enabled by
+  `config.oauth_allow_loopback_redirects`. It is the exception because it is the
+  one target that CANNOT be named even in principle — an MCP client on an
+  operator's machine listens on an ephemeral port chosen at runtime, so no list
+  could enumerate it (RFC 8252 §7.3 exists for this) — and because a loopback
+  address resolves on the operator's OWN machine, so the attack above, which needs
+  the code to reach a REMOTE attacker, does not work through it.
+
+  A private-use scheme (`cursor://…`, §7.1) is NOT covered: its redirect URI is a
+  fixed string, so it just goes in the allowlist. There is no forcing reason to
+  accept one unnamed, and whole schemes cannot be accepted generically anyway —
+  separating a private-use scheme from a registered network one (`ssh:`, `ldap:`,
+  `gopher:`, each naming a REMOTE host) would mean enumerating the IANA registry,
+  and a denylist of the ones you thought of is the shape that fails open.
+
+  Loopback is judged on the PARSED URI: `http://127.0.0.1@evil.example/` has host
+  `evil.example` and is remote, as is `http://127.0.0.1.evil.example/`; a fragment
+  is refused.
 
   Endpoints — `GET`/`POST` `<mcp>/oauth/authorize`, `POST <mcp>/oauth/token`,
   `POST <mcp>/oauth/register`, plus the two metadata documents. A `/.well-known/*`
@@ -67,7 +77,7 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   URL itself. A host mounted AT its origin root has no path to insert and gets the
   bare paths, which is correct there.
 - `config.oauth_allowed_redirect_uris` (default `[]`),
-  `config.oauth_allow_native_client_redirects` (default `false`),
+  `config.oauth_allow_loopback_redirects` (default `false`),
   `config.oauth_resource_path` (default `"/mcp"` — must match the engine's mount
   point), `config.oauth_authorization_code_ttl` (default `60`), and
   `config.oauth_parent_controller` (default `"ActionController::Base"`).
@@ -75,15 +85,20 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   on a `token_authenticator` being set, since the bridge verifies the pasted token
   through it on both legs and drawing no route beats an authorization page that
   takes an operator's token and then errors; and on at least one redirect target
-  being named (an allowlist entry or the native-client switch), so it cannot run
+  being named (an allowlist entry or the loopback switch), so it cannot run
   without a bound answer to who may receive a code. A satellite — whose tokens
   belong to its central app — never draws it.
-- Both metadata documents are served `Cache-Control: no-store`. They name the
+- The token response is served `Cache-Control: no-store` + `Pragma: no-cache`, a
+  MUST of RFC 6749 §5.1 for any response carrying a token. Both metadata documents
+  get the same headers for a subtler reason: they name the
   `authorization_endpoint` an operator will be sent to and are built from the
   caller-influenced request origin (`request.base_url` honours `X-Forwarded-Host`),
   so a shared cache holding one could hand every client an origin an attacker
   chose, with the document itself vouching for it. Hosts should also pin
   `config.hosts`, which Rails leaves empty in production by default.
+- `POST <mcp>/oauth/authorize` answers **303**, not Rails' default 302. That POST
+  carried the operator's token in its body, and only 303 unambiguously tells the
+  browser to fetch the callback with GET and no body (RFC 9700 §4.12).
 - The authority transport's 401 now carries
   `WWW-Authenticate: Bearer resource_metadata="..."` when the bridge is configured —
   the header a hosted client waits for before it will start a flow at all. Absent

@@ -432,7 +432,7 @@ McpToolkit.configure do |c|
   # Optional: let any MCP client running on your operators' OWN machines connect
   # without an allowlist entry each (RFC 8252 — see below). This is an opt-in
   # signal in its own right, so it alone can switch the bridge on.
-  c.oauth_allow_native_client_redirects = true
+  c.oauth_allow_loopback_redirects = true
 end
 ```
 
@@ -479,21 +479,25 @@ re-verifying the token. A full authorization server blocks this with a consent
 screen naming the client plus an authenticated session; this bridge mocks both
 away, which is exactly what the redirect policy compensates for.
 
-That threat needs the code to reach a **remote** attacker, which is what splits
-the policy in two:
+So **every target must be named by exact string**, with exactly one exception:
 
 | Target | Rule | Why |
 |---|---|---|
-| Remote (`https://client.example/cb`) | Exact string, in `oauth_allowed_redirect_uris` | The phishing vector. Never opened up. |
-| Loopback (`http://127.0.0.1:*`, `localhost`, `[::1]`) | Allowed by `oauth_allow_native_client_redirects` | RFC 8252 §7.3. The code lands on the operator's own machine; the port is ephemeral and cannot be registered ahead of time. |
-| Private-use scheme (`cursor://…`, `com.example.app:/cb`) | Allowed by `oauth_allow_native_client_redirects` | RFC 8252 §7.1. Handed to a locally registered app; the code never leaves the device. |
+| Anything remote (`https://client.example/cb`) | Exact string, in `oauth_allowed_redirect_uris` | The phishing vector. Never opened up. |
+| Private-use scheme (`cursor://…`, `com.example.app:/cb`) | Exact string, in `oauth_allowed_redirect_uris` | Keeps the code on the device, but its URI is a fixed string — so just name it. |
+| Loopback (`http://127.0.0.1:*`, `localhost`, `[::1]`) | `oauth_allow_loopback_redirects` | The only target that **cannot** be named: the client picks an ephemeral port at runtime (RFC 8252 §7.3). And it resolves on the operator's own machine, so the attack above cannot reach it. |
 
-So **every MCP client on your operators' machines works with no configuration**,
-while a hosted client needs one allowlist entry. Native targets are judged on the
-*parsed* URI — `http://127.0.0.1@evil.example/` (host `evil.example`) and
-`http://127.0.0.1.evil.example/` are both correctly seen as remote — and a
-fragment, an opaque URI, or a `javascript:`/`data:`/`file:` scheme is refused
-outright.
+The loopback exception exists because an allowlist entry is *impossible* there,
+not because native clients are trusted. A private-use scheme keeps the code on the
+device too, but nothing forces it to be unnamed — and whole **schemes** cannot be
+accepted generically anyway: telling a private-use scheme from a registered
+network one (`ssh:`, `ldap:`, `gopher:` — each naming a **remote** host) would
+mean enumerating the IANA registry, and a denylist of the ones you happened to
+think of is the shape that fails open.
+
+Loopback is judged on the *parsed* URI, so `http://127.0.0.1@evil.example/` (host
+`evil.example`) and `http://127.0.0.1.evil.example/` are both correctly seen as
+remote, and a fragment is refused.
 
 ### Deployment note
 
@@ -526,7 +530,7 @@ If your MCP endpoint IS its origin root (a dedicated MCP domain), there is no pa
 to insert and you get the bare paths — correct there, since your server really is
 that origin's only authorization server. Set `oauth_resource_path = "/"`.
 
-`oauth_allowed_redirect_uris` is empty and `oauth_allow_native_client_redirects`
+`oauth_allowed_redirect_uris` is empty and `oauth_allow_loopback_redirects`
 is off by default, which leaves `config.oauth_bridge?` false and the routes
 undrawn — the bridge cannot run without bounds on where codes may go. A satellite
 never draws it at all (its tokens belong to its central app, so there is nothing

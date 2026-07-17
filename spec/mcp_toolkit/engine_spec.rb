@@ -111,7 +111,7 @@ RSpec.describe "Mountable engine + gem controller" do
     before do
       McpToolkit.config.auth_role = auth_role
       McpToolkit.config.oauth_allowed_redirect_uris = oauth_redirect_uris
-      McpToolkit.config.oauth_allow_native_client_redirects = oauth_allow_native
+      McpToolkit.config.oauth_allow_loopback_redirects = oauth_allow_native
       McpToolkit.config.token_authenticator = token_authenticator
       recorder = route_recorder
       stub_const("Rails", Module.new)

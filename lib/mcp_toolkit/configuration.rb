@@ -137,7 +137,7 @@ class McpToolkit::Configuration
   # screen naming the client plus an authenticated session. This bridge mocks both
   # away, and this allowlist is what compensates.
   #
-  # EMPTY BY DEFAULT. Empty, and with `oauth_allow_native_client_redirects` off,
+  # EMPTY BY DEFAULT. Empty, and with `oauth_allow_loopback_redirects` off,
   # the bridge is DISABLED entirely (see `oauth_bridge?`) — so it cannot be
   # switched on without naming who may receive a code, and a host that wants
   # nothing to do with it sets nothing.
@@ -147,27 +147,36 @@ class McpToolkit::Configuration
   # @return [Array<String>]
   attr_accessor :oauth_allowed_redirect_uris
 
-  # Permits NATIVE-client targets generically, without naming each one: loopback
-  # on any port (RFC 8252 §7.3 — the port is ephemeral, so it could not be named
-  # ahead of time) and private-use schemes (§7.1), i.e. `http://127.0.0.1:54321/cb`,
-  # `http://localhost:*/cb`, `cursor://…`.
+  # Permits LOOPBACK redirect targets on any port without naming each one:
+  # `http://127.0.0.1:54321/cb`, `http://localhost:*/cb`, `http://[::1]:*/cb`.
   #
-  # Safe to open generically for the same reason the allowlist above cannot be:
-  # these deliver the code to the OPERATOR'S OWN DEVICE, and the phishing above
-  # needs it to reach a REMOTE attacker. (The residual risk is a malicious app
-  # already installed on that machine squatting the scheme — local code execution,
-  # a lost game regardless. RFC 8252 lets native apps skip pre-registration on
-  # this same reasoning.) A remote `https://` callback is never covered by this,
-  # whatever it is set to.
+  # This is the one target that cannot be allowlisted even in principle — an MCP
+  # client on an operator's machine listens on an ephemeral port chosen at
+  # runtime, so no list could enumerate it (RFC 8252 §7.3 exists for exactly
+  # this). And it is safe to accept unnamed for the same reason the list above
+  # cannot be opened up: a loopback address resolves on the operator's OWN
+  # machine, so the phishing described above — which needs the code to reach a
+  # REMOTE attacker — does not work through it.
   #
-  # OFF BY DEFAULT: switching it on says "any MCP client on my operators' machines
-  # may receive a code", which is a decision, not a default — and so is an opt-in
+  # Note what this deliberately does NOT cover: a private-use scheme
+  # (`cursor://…`, RFC 8252 §7.1). Those keep the code on the device too, but
+  # their redirect URI is a FIXED STRING, so it simply goes in the list above —
+  # there is no forcing reason to accept one unnamed. And whole schemes cannot be
+  # accepted generically anyway: separating a private-use scheme from a
+  # registered network one (`ssh:`, `ldap:`, `gopher:` — each naming a remote
+  # host) would mean enumerating the IANA registry, and a denylist of the ones
+  # you happened to think of is the shape that fails open.
+  #
+  # A remote `https://` callback is never covered by this, whatever it is set to.
+  #
+  # OFF BY DEFAULT: switching it on says "any client on my operators' machines may
+  # receive a code", which is a decision, not a default — and so is an opt-in
   # signal in its own right.
   #
-  #   c.oauth_allow_native_client_redirects = true
+  #   c.oauth_allow_loopback_redirects = true
   #
   # @return [Boolean]
-  attr_accessor :oauth_allow_native_client_redirects
+  attr_accessor :oauth_allow_loopback_redirects
 
   # The path McpToolkit::Engine is mounted at, used to build the `resource`
   # identifier, the issuer, the two metadata locations, and the bridge's own
@@ -556,7 +565,7 @@ class McpToolkit::Configuration
   # never configures it is unaffected.
   def initialize_oauth_bridge_defaults
     @oauth_allowed_redirect_uris = []
-    @oauth_allow_native_client_redirects = false
+    @oauth_allow_loopback_redirects = false
     @oauth_resource_path = "/mcp"
     @oauth_authorization_code_ttl = 60
     @oauth_parent_controller = "ActionController::Base"
@@ -734,7 +743,7 @@ class McpToolkit::Configuration
     return false unless authority?
     return false if token_authenticator.nil?
 
-    Array(oauth_allowed_redirect_uris).any? || !!oauth_allow_native_client_redirects
+    Array(oauth_allowed_redirect_uris).any? || !!oauth_allow_loopback_redirects
   end
 
   # Full introspection URL the satellite POSTs to. Raises a clear error if the

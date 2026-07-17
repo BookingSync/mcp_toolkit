@@ -216,32 +216,45 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     result["replayed_code_status"] = session.last_response.status
     result["replayed_code_body"] = JSON.parse(session.last_response.body)
 
-    # 10. A NATIVE client (RFC 8252), whose ephemeral loopback port no host could
+    # 10. A LOOPBACK client (RFC 8252 §7.3), whose ephemeral port no host could
     # have allowlisted ahead of time. Off until the host opts in, so prove both
     # states through the real stack rather than trusting the unit's fake host.
     loopback_uri = "http://127.0.0.1:54321/cb"
-    native_query = authorize_query.merge(redirect_uri: loopback_uri)
-    session.get("/mcp/oauth/authorize", native_query)
-    result["native_authorize_status_when_off"] = session.last_response.status
+    loopback_query = authorize_query.merge(redirect_uri: loopback_uri)
+    session.get("/mcp/oauth/authorize", loopback_query)
+    result["loopback_authorize_status_when_off"] = session.last_response.status
 
-    McpToolkit.config.oauth_allow_native_client_redirects = true
-    session.get("/mcp/oauth/authorize", native_query)
-    result["native_authorize_status_when_on"] = session.last_response.status
+    McpToolkit.config.oauth_allow_loopback_redirects = true
+    session.get("/mcp/oauth/authorize", loopback_query)
+    result["loopback_authorize_status_when_on"] = session.last_response.status
 
-    session.post("/mcp/oauth/authorize", native_query.merge(access_token: VALID_TOKEN))
-    native_location = session.last_response.headers["Location"]
-    result["native_location_prefix"] = native_location && native_location.split("?").first
-    native_code = native_location && Rack::Utils.parse_query(URI.parse(native_location).query)["code"]
+    session.post("/mcp/oauth/authorize", loopback_query.merge(access_token: VALID_TOKEN))
+    result["approve_redirect_status"] = session.last_response.status
+    loopback_location = session.last_response.headers["Location"]
+    result["loopback_location_prefix"] = loopback_location && loopback_location.split("?").first
+    loopback_code = loopback_location && Rack::Utils.parse_query(URI.parse(loopback_location).query)["code"]
 
     session.post("/mcp/oauth/token", {
-      grant_type: "authorization_code", code: native_code, redirect_uri: loopback_uri, code_verifier: verifier
+      grant_type: "authorization_code", code: loopback_code, redirect_uri: loopback_uri, code_verifier: verifier
     })
-    result["native_token_is_the_pasted_token"] = JSON.parse(session.last_response.body)["access_token"] == VALID_TOKEN
+    result["loopback_token_is_the_pasted_token"] = JSON.parse(session.last_response.body)["access_token"] == VALID_TOKEN
+    result["token_cache_control"] = session.last_response.headers["Cache-Control"]
+    result["token_pragma"] = session.last_response.headers["Pragma"]
 
-    # Opting native clients in must not turn the remote allowlist into a
-    # suggestion — this is the phishing target, and it stays named-only.
-    session.get("/mcp/oauth/authorize", authorize_query.merge(redirect_uri: "https://attacker.example/x"))
-    result["remote_unregistered_status_with_native_on"] = session.last_response.status
+    # Allowing loopback must widen NOTHING else. A registered network scheme names
+    # a REMOTE host and would carry the code off the device; a private-use scheme
+    # is a fixed string that belongs in the allowlist; and the remote allowlist is
+    # the phishing target and stays named-only.
+    {
+      "ssh_status" => "ssh://attacker.example/cb",
+      "gopher_status" => "gopher://attacker.example/cb",
+      "ldap_status" => "ldap://attacker.example/cb",
+      "private_scheme_status" => "cursor://anysphere.cursor-retrieval/oauth/callback",
+      "remote_unregistered_status" => "https://attacker.example/x"
+    }.each do |key, uri|
+      session.get("/mcp/oauth/authorize", authorize_query.merge(redirect_uri: uri))
+      result[key] = session.last_response.status
+    end
 
     puts JSON.generate(result)
   RUBY
@@ -294,22 +307,48 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     end
   end
 
-  # RFC 8252 native clients: the ephemeral loopback port cannot be registered
-  # ahead of time, and it does not need to be — the code goes to the operator's
-  # own machine, where the phishing the allowlist stops cannot reach.
-  describe "native (RFC 8252) clients" do
+  # Loopback (RFC 8252 §7.3) is the one target that cannot be named ahead of time
+  # — the client picks an ephemeral port at runtime — and the one that need not be,
+  # since the code goes to the operator's own machine.
+  describe "loopback (RFC 8252) clients" do
     it "refuses loopback until the host opts in" do
-      expect(@result.fetch("native_authorize_status_when_off")).to eq(400)
+      expect(@result.fetch("loopback_authorize_status_when_off")).to eq(400)
     end
 
     it "runs a loopback client through the whole flow once opted in" do
-      expect(@result.fetch("native_authorize_status_when_on")).to eq(200)
-      expect(@result.fetch("native_location_prefix")).to eq("http://127.0.0.1:54321/cb")
-      expect(@result.fetch("native_token_is_the_pasted_token")).to be(true)
+      expect(@result.fetch("loopback_authorize_status_when_on")).to eq(200)
+      expect(@result.fetch("loopback_location_prefix")).to eq("http://127.0.0.1:54321/cb")
+      expect(@result.fetch("loopback_token_is_the_pasted_token")).to be(true)
     end
 
-    it "keeps a remote callback allowlist-only even with native clients allowed" do
-      expect(@result.fetch("remote_unregistered_status_with_native_on")).to eq(400)
+    # Allowing loopback widens loopback and nothing else. A scheme judged local
+    # merely by its absence from a denylist is how `ssh://attacker.example` would
+    # carry the code straight off the device.
+    it "refuses registered network schemes, which name a remote host" do
+      expect(@result.fetch("ssh_status")).to eq(400)
+      expect(@result.fetch("gopher_status")).to eq(400)
+      expect(@result.fetch("ldap_status")).to eq(400)
+    end
+
+    it "refuses an unnamed private-use scheme, which is a fixed string to allowlist" do
+      expect(@result.fetch("private_scheme_status")).to eq(400)
+    end
+
+    it "keeps a remote callback allowlist-only even with loopback allowed" do
+      expect(@result.fetch("remote_unregistered_status")).to eq(400)
+    end
+  end
+
+  # RFC 6749 §5.1 (both headers on a token response) and RFC 9700 §4.12 (303 after
+  # a POST that carried a credential), asserted through the real stack.
+  describe "token-bearing responses" do
+    it "forbids caching the token response" do
+      expect(@result.fetch("token_cache_control")).to eq("no-store")
+      expect(@result.fetch("token_pragma")).to eq("no-cache")
+    end
+
+    it "redirects with 303 after the paste, so the token body is not resent" do
+      expect(@result.fetch("approve_redirect_status")).to eq(303)
     end
   end
 
@@ -388,8 +427,10 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
   end
 
   describe "the paste" do
+    # 303, not 302: this POST carried the token in its body, and only 303 tells the
+    # browser unambiguously to GET the callback without resending it.
     it "redirects back to the client with the echoed state" do
-      expect(@result.fetch("approve_status")).to eq(302)
+      expect(@result.fetch("approve_status")).to eq(303)
       expect(@result.fetch("approve_location_host")).to eq("https://client.example/callback")
       expect(@result.fetch("approve_state")).to eq("opaque-state")
     end

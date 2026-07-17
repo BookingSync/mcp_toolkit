@@ -225,11 +225,11 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
     end
   end
 
-  # RFC 8252 native clients. These need no allowlist entry because the code is
-  # delivered to the operator's OWN machine, which is what makes them a different
-  # kind of target rather than a laxer rule — the phishing the allowlist exists to
-  # stop needs the code to reach a REMOTE attacker.
-  describe "native-client redirect targets" do
+  # Loopback (RFC 8252 §7.3) is the ONE target accepted without being named,
+  # because it is the one that cannot be named: the client picks an ephemeral port
+  # at runtime. Everything else — including a private-use scheme, which also keeps
+  # the code on the device — is a fixed string and goes in the allowlist.
+  describe "loopback redirect targets" do
     def authorize_with(uri)
       controller.params = authorize_params(redirect_uri: uri)
       controller.authorize
@@ -242,8 +242,8 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       end
     end
 
-    context "when the host allows native clients" do
-      before { McpToolkit.config.oauth_allow_native_client_redirects = true }
+    context "when the host allows loopback" do
+      before { McpToolkit.config.oauth_allow_loopback_redirects = true }
 
       # The port is ephemeral, so it cannot be registered ahead of time — which is
       # the entire reason RFC 8252 §7.3 exists.
@@ -256,13 +256,23 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
         expect(authorize_with("http://[::1]:8080/cb")[:template]).to eq(:authorize)
       end
 
-      it "accepts a private-use scheme (§7.1), as a desktop MCP client registers" do
-        expect(authorize_with("cursor://anysphere.cursor-retrieval/oauth/callback")[:template]).to eq(:authorize)
-        expect(authorize_with("com.example.app:/oauth2redirect")[:template]).to eq(:authorize)
+      # The switch says "loopback", never "any scheme that looks local". A
+      # REGISTERED NETWORK scheme names a remote host and would carry the code
+      # straight off the device, so no scheme is judged local by its absence from
+      # a list of ones we thought of — a private-use scheme is a fixed string and
+      # belongs in the allowlist like anything else.
+      it "refuses registered network schemes, which name a remote host" do
+        ["ssh://attacker.example/cb", "gopher://attacker.example/cb", "ldap://attacker.example/cb",
+         "telnet://attacker.example/cb", "smb://attacker.example/cb", "nfs://attacker.example/cb"]
+          .each { |uri| expect(authorize_with(uri)[:options]).to include(status: :bad_request) }
       end
 
-      # The switch says "any client on my operators' MACHINES", never "any client".
-      # A remote callback is the phishing vector and stays allowlist-only.
+      it "refuses an unnamed private-use scheme (it is a fixed string — allowlist it)" do
+        expect(authorize_with("cursor://anysphere.cursor-retrieval/oauth/callback")[:options])
+          .to include(status: :bad_request)
+        expect(authorize_with("com.example.app:/oauth2redirect")[:options]).to include(status: :bad_request)
+      end
+
       it "still refuses a remote https callback that was never named" do
         expect(authorize_with("https://attacker.example/steal")[:options]).to include(status: :bad_request)
       end
@@ -291,13 +301,46 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
         expect(authorize_with("http://127.0.0.1:5/cb#frag")[:options]).to include(status: :bad_request)
       end
 
-      it "hands a code to a native client through the full flow" do
-        native_uri = "http://127.0.0.1:54321/cb"
-        controller.params = authorize_params(redirect_uri: native_uri).merge(access_token: valid_token)
+      it "hands a code to a loopback client through the full flow" do
+        loopback_uri = "http://127.0.0.1:54321/cb"
+        controller.params = authorize_params(redirect_uri: loopback_uri).merge(access_token: valid_token)
         controller.approve
 
-        expect(controller.redirected_to[:url]).to start_with("#{native_uri}?code=")
+        expect(controller.redirected_to[:url]).to start_with("#{loopback_uri}?code=")
       end
+
+      # An allowlisted private-use scheme must still WORK — the rule is "name it",
+      # not "no desktop clients".
+      it "hands a code to an allowlisted private-use scheme client" do
+        scheme_uri = "cursor://anysphere.cursor-retrieval/oauth/callback"
+        McpToolkit.config.oauth_allowed_redirect_uris = [scheme_uri]
+        controller.params = authorize_params(redirect_uri: scheme_uri).merge(access_token: valid_token)
+        controller.approve
+
+        expect(controller.redirected_to[:url]).to start_with("#{scheme_uri}?code=")
+      end
+    end
+  end
+
+  # RFC 6749 §5.1 makes both headers a MUST on any response carrying a token, and
+  # RFC 9700 §4.12 wants a 303 after a POST that carried a credential.
+  describe "the token-bearing responses" do
+    it "forbids caching the token response" do
+      code = issue_code
+      controller.params = exchange_params.merge(code:)
+      controller.token
+
+      expect(controller.response.headers["Cache-Control"]).to eq("no-store")
+      expect(controller.response.headers["Pragma"]).to eq("no-cache")
+    end
+
+    # The approve POST carried the operator's token in its body; only 303 tells the
+    # browser unambiguously to GET the callback without resending it.
+    it "redirects with 303 after the credential POST, not 302" do
+      controller.params = authorize_params.merge(access_token: valid_token)
+      controller.approve
+
+      expect(controller.redirected_to[:options]).to include(status: :see_other)
     end
   end
 
