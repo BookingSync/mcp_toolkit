@@ -174,25 +174,14 @@ module McpToolkit::Oauth::ControllerMethods
     mcp_oauth_loopback_redirect_uri?(redirect_uri)
   end
 
-  # RFC 8252 §7.3 loopback: the ONLY target accepted without being named, because
-  # it is the only one that CANNOT be named — the client listens on an ephemeral
-  # port chosen at runtime, so no allowlist could enumerate it. That, and not
-  # "native clients are trusted", is the whole justification: an allowlist entry
-  # is impossible here and merely inconvenient everywhere else.
+  # RFC 8252 §7.3 loopback — the one target accepted unnamed, and only http(s) to
+  # a loopback host: NOT private-use schemes, however local they look. See
+  # Configuration#oauth_allow_loopback_redirects for why that line is drawn there.
   #
-  # A private-use scheme (`cursor://…`, §7.1) is deliberately NOT accepted here,
-  # even though it also keeps the code on the device. Its redirect URI is a fixed
-  # string, so it can simply go in `oauth_allowed_redirect_uris` — there is no
-  # forcing reason to accept it unnamed, and accepting whole SCHEMES generically
-  # cannot be done safely: the only way to separate a private-use scheme from a
-  # registered network one (`ssh:`, `ldap:`, `gopher:` — each naming a REMOTE
-  # host) is to enumerate the IANA registry, and a denylist of the ones you
-  # thought of is exactly the shape that fails open.
-  #
-  # Checked against the PARSED URI, never the string: `host` is what a browser
-  # resolves, so `http://127.0.0.1@evil.example/` (userinfo; host evil.example)
-  # and `http://127.0.0.1.evil.example/` are both correctly seen as remote. A
-  # fragment is refused because OAuth forbids one on a redirect_uri.
+  # Judged on the PARSED URI, never the string, because `host` is what a browser
+  # resolves: `http://127.0.0.1@evil.example/` (userinfo — host is evil.example)
+  # and `http://127.0.0.1.evil.example/` are both correctly remote. A fragment is
+  # refused because OAuth forbids one on a redirect_uri.
   def mcp_oauth_loopback_redirect_uri?(redirect_uri)
     return false unless mcp_oauth_config.oauth_allow_loopback_redirects
 
@@ -269,28 +258,16 @@ module McpToolkit::Oauth::ControllerMethods
     "#{CODE_CACHE_PREFIX}#{Digest::SHA256.hexdigest(code)}"
   end
 
-  # Keyed on a SERVER-HELD secret as well as the code, and that is the whole
-  # point: deriving from the code alone made the code the entire secret, and the
-  # code is not one. Rails logs it twice per flow at INFO — `Redirected to
-  # ...?code=...` (only `config.filter_redirect` touches that line) and the token
-  # endpoint's `Parameters:` (no stock `filter_parameters` entry matches `code`)
-  # — so an artifact that is more widely read, longer retained and more
-  # replicated than a 60-second cache entry was carrying the key to it. Mixing in
-  # `oauth_signing_secret` means the cache, the logs and the code together still
-  # open nothing without a secret that lives in ENV and is never logged.
+  # HMAC because two independent inputs are being combined (why the secret is one
+  # of them: Configuration#oauth_signing_secret). No password-stretching — both
+  # are already high-entropy, so a PBKDF2 run per request would buy nothing.
   #
-  # HMAC rather than a bare digest because two independent inputs are being
-  # combined and HMAC is what does that safely. No password-stretching: both
-  # inputs are already high-entropy (a 256-bit `SecureRandom` code, a real
-  # `secret_key_base`), so a PBKDF2 run per request would buy nothing.
-  #
-  # Cipher AND serializer are pinned rather than inherited — the gem supports
+  # Cipher and serializer are pinned, not inherited: the gem supports
   # ActiveSupport >= 6.1, where both defaults are Rails-configuration-dependent.
-  # The serializer especially: every default in that range (`:marshal`, and
+  # The serializer especially — every default in that range (`:marshal`, and
   # 7.1+'s `:json_allow_marshal`) reaches `Marshal.load`, so a host with cache
-  # write access forging one blob would get remote code execution. The payload is
-  # already a JSON String, so NullSerializer is exactly right and JSON.parse ends
-  # up the only parser that ever sees it.
+  # write access forging one blob would get code execution. The payload is already
+  # a JSON String, so NullSerializer leaves JSON.parse the only parser that sees it.
   def mcp_oauth_encryptor(code)
     key = OpenSSL::HMAC.digest("SHA256", mcp_oauth_signing_secret, "#{CODE_CACHE_PREFIX}key:#{code}")
     ActiveSupport::MessageEncryptor.new(
@@ -355,11 +332,9 @@ module McpToolkit::Oauth::ControllerMethods
   # Dropping any inbound `code`/`state` keeps the response OAuth-shaped whatever
   # was passed in.
   #
-  # Built by string, not by `URI#query=`: the value here has already been checked
-  # by the redirect policy, and re-parsing it to reconstruct it only invents ways
-  # for the emitted URL to differ from the one that was approved — `URI#query=`
-  # also raises outright on an opaque URI (`com.example.app:cb`), which a host may
-  # legitimately allowlist.
+  # Built by string, not by `URI#query=`: this value has already been checked by
+  # the redirect policy, so re-parsing it to reconstruct it only invents ways for
+  # the emitted URL to differ from the one that was approved.
   def mcp_oauth_callback_url(code)
     redirect_uri = params[:redirect_uri].to_s
     base, _, existing = redirect_uri.partition("?")
