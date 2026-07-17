@@ -281,6 +281,14 @@ class McpToolkit::Configuration
   end
 
   # Short enough to admit any real secret, long enough to catch a placeholder.
+  #
+  # Deliberately NOT applied to the `secret_key_base` fallback, which is checked
+  # for presence only. The minimum exists to catch a placeholder a host typed into
+  # THIS setting; `secret_key_base` is Rails' own, is 128 chars in a real
+  # deployment, and is short only in environments where Rails generates a throwaway
+  # (a stock test env is ~15 bytes). A genuinely weak `secret_key_base` is an
+  # app-wide problem — signed cookies, message verifiers, Active Record encryption
+  # — and not this gem's to police from the outside.
   MINIMUM_SIGNING_SECRET_BYTES = 32
 
   # Reads the configured secret, else the Rails app's `secret_key_base`. Resolved
