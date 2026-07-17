@@ -263,7 +263,7 @@ RSpec.describe McpToolkit::Authority::ControllerMethods do
         # but its PRESENCE is part of what makes the bridge configured at all.
         McpToolkit.config.token_authenticator = ->(_plaintext) { nil }
         # Likewise: no Rails here, so the secret_key_base default cannot resolve.
-        McpToolkit.config.oauth_signing_secret = "spec-oauth-signing-secret"
+        McpToolkit.config.oauth_signing_secret = "spec-oauth-signing-secret-at-least-32-bytes-long"
       end
 
       # Path-scoped: stating the location outright is also what keeps a client from

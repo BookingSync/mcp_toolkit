@@ -526,9 +526,16 @@ reaches the bridge — Rails does *not* do this for you: it populates `config.ho
 in development and leaves it **empty in production**, where empty means no
 checking at all. Both metadata documents are served
 `Cache-Control: no-store` regardless, so no shared cache can hand one client an
-origin another client chose. If you log request parameters, add `code_verifier` to
-`config.filter_parameters` (`access_token` is already covered by the stock `token`
-entry).
+origin another client chose.
+
+**Serve it over HTTPS** (`config.force_ssl = true`). The authorization page
+receives a live access token in a POST body; on cleartext that token is on the
+wire. The gem refuses a cleartext remote `redirect_uri` in the allowlist for the
+same reason, but it cannot make your own origin HTTPS for you.
+
+The engine adds `access_token` and `code_verifier` to `config.filter_parameters`
+itself, so the pasted token stays out of your logs even on a host that ships no
+filter list of its own — nothing to configure.
 
 **It is additive to an OAuth provider you already run, and it claims nothing
 origin-global.** The flow endpoints live under the engine's mount

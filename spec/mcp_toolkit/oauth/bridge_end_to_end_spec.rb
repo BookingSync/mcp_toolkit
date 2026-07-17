@@ -168,7 +168,7 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     result["register"] = JSON.parse(session.last_response.body)
 
     # 5. The authorization page — does the view actually render?
-    verifier  = "e2e-high-entropy-code-verifier-value"
+    verifier  = "e2e-high-entropy-code-verifier-value-of-legal-length" # RFC 7636 §4.1: 43-128 chars
     challenge = [Digest::SHA256.digest(verifier)].pack("m0").tr("+/", "-_").delete("=")
     authorize_query = {
       response_type: "code", client_id: result["register"]["client_id"], redirect_uri: REDIRECT_URI,
@@ -262,10 +262,22 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       result[key] = session.last_response.status
     end
 
-    # 11. A format suffix must not reach the action: there is no JSON template, so
-    # it would 500 unauthenticated.
+    # 11. A format must not reach the action by EITHER route — a `.json` suffix or
+    # an `Accept` header. There is no JSON template, so both would raise
+    # unauthenticated. The suffix was fixed first; the header is the same hole.
     session.get("/mcp/oauth/authorize.json", authorize_query)
     result["authorize_json_suffix_status"] = session.last_response.status
+
+    session.get("/mcp/oauth/authorize", authorize_query, "HTTP_ACCEPT" => "application/json")
+    result["authorize_json_accept_status"] = session.last_response.status
+
+    # 11b. And the bad-paste page must be a real 422, not a 500. `:unprocessable_content`
+    # raises below Rack 3.1 and the gemspec declares no floor.
+    session.post("/mcp/oauth/authorize", authorize_query.merge(access_token: "nope"))
+    result["bad_paste_status"] = session.last_response.status
+    session.post("/mcp/oauth/authorize", authorize_query.merge(access_token: "nope"),
+                 "HTTP_ACCEPT" => "application/json")
+    result["bad_paste_json_accept_status"] = session.last_response.status
 
     # 12. A loopback client controls its own query, so it can pass `?code=`. The
     # response owns that parameter — ours must be the only one.
@@ -372,6 +384,21 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
   describe "request shapes that must not reach an action" do
     it "does not serve a format suffix the bridge never speaks" do
       expect(@result.fetch("authorize_json_suffix_status")).to eq(404)
+    end
+
+    # The `.json` suffix and an `Accept` header pick the format equally; closing
+    # only the one a reviewer named would leave its twin open.
+    it "renders the page regardless of what the caller says it accepts" do
+      expect(@result.fetch("authorize_json_accept_status")).to eq(200)
+    end
+  end
+
+  # A mistyped paste is the one thing this page exists to handle gracefully, and
+  # it must not depend on a Rack version the gemspec never pinned.
+  describe "the bad-paste page" do
+    it "is a real 422 on any Rack, whatever the caller accepts" do
+      expect(@result.fetch("bad_paste_status")).to eq(422)
+      expect(@result.fetch("bad_paste_json_accept_status")).to eq(422)
     end
   end
 

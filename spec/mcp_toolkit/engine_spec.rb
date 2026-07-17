@@ -119,7 +119,7 @@ RSpec.describe "Mountable engine + gem controller" do
     let(:token_authenticator) { ->(_plaintext) { nil } }
     # No Rails in this suite, so the secret_key_base default cannot resolve; the
     # gate's own requirement for it is asserted separately below.
-    let(:oauth_signing_secret) { "spec-oauth-signing-secret" }
+    let(:oauth_signing_secret) { "spec-oauth-signing-secret-at-least-32-bytes-long" }
 
     before do
       McpToolkit.config.auth_role = auth_role
@@ -135,6 +135,10 @@ RSpec.describe "Mountable engine + gem controller" do
       config_double = Class.new { def to_prepare(*); end }.new
       engine_base = Class.new do
         define_singleton_method(:isolate_namespace) { |_mod| }
+        # The engine also registers an initializer (filter_parameters for the
+        # bridge's token-bearing params); recorded, not run — this unit boots no app.
+        define_singleton_method(:initializer) { |name, &block| (@initializers ||= {})[name] = block }
+        define_singleton_method(:initializers) { @initializers ||= {} }
       end
       engine_base.define_singleton_method(:config) { config_double }
       stub_const("Rails::Engine", engine_base)

@@ -77,9 +77,13 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   URL itself. A host mounted AT its origin root has no path to insert and gets the
   bare paths, which is correct there.
 - `config.oauth_allowed_redirect_uris` (default `[]`; entries are validated at
-  assignment — an unparseable, scheme-less, fragment-bearing or *opaque* URI
-  raises, because the alternative is a 500 after the operator has already pasted
-  their token), `config.oauth_allow_loopback_redirects` (default `false`),
+  assignment and the list is frozen — an unparseable, scheme-less,
+  fragment-bearing or *opaque* URI raises, as does cleartext `http://` to a remote
+  host and the `javascript:`/`data:`/`file:` schemes a browser treats as script.
+  Naming bad schemes is sound here and nowhere else: this list is what the HOST
+  wrote, so there is no unlisted scheme for an attacker to slip through — unlike
+  the request-time policy, which is why that one takes the opposite shape),
+  `config.oauth_allow_loopback_redirects` (default `false`),
   `config.oauth_resource_path` (default `"/mcp"` — must match the engine's mount
   point), `config.oauth_authorization_code_ttl` (default `60`),
   `config.oauth_signing_secret` (defaults to the Rails app's `secret_key_base`),
@@ -142,9 +146,25 @@ opt-in: a host that configures nothing behaves exactly as it did on 0.5.0.
   separate means enabling the bridge changes nothing about the transport. Point
   `oauth_parent_controller` at your own `ApplicationController` to inherit app
   branding; the page renders with `layout: false` either way.
-- If a host logs request parameters, add `code_verifier` to
-  `config.filter_parameters`; `access_token` is already covered by the stock
-  `token` entry Rails ships.
+- The engine adds `access_token` and `code_verifier` to `config.filter_parameters`
+  itself. The bridge takes a live token in a POST body and Rails logs parameters
+  at INFO, so filtering it is the gem's business — a `rails new` app happens to
+  ship a `:token` entry that covers `access_token` by substring, but that is a
+  host default the gem does not own and an `--api` host may not have.
+- **Serve the bridge over HTTPS** (`config.force_ssl`). The authorization page
+  receives a live access token; on cleartext it is on the wire. A cleartext remote
+  `redirect_uri` is refused in the allowlist for the same reason, but the gem
+  cannot make a host's own origin HTTPS.
+- The bad-paste page answers **422 as an integer**, not a symbol: the gemspec pins
+  no Rack floor and neither symbol spans the supported range
+  (`:unprocessable_content` raises below Rack 3.1, `:unprocessable_entity` is
+  deprecated above it), so a symbol would turn a mistyped paste into an
+  unauthenticated 500 on Rails 7.x.
+- `config.oauth_allowed_redirect_uris` is **frozen** once assigned, and
+  `config.oauth_signing_secret=` validates its input. Both are the same lesson:
+  validation that can be bypassed (`<<` onto the reader) or skipped (a bare
+  writer) is a suggestion, and both failures surface at request time — after an
+  operator has pasted a live token.
 - **A host MUST pin `config.hosts`.** Every identifier the bridge publishes is
   derived from `request.base_url`, which honours `X-Forwarded-Host`. Rails does
   not pin it for you — it populates `config.hosts` in development and leaves it

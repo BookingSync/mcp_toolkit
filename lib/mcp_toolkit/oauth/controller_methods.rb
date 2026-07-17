@@ -29,15 +29,13 @@ module McpToolkit::Oauth::ControllerMethods
   CODE_CACHE_PREFIX = "mcp_toolkit:oauth:code:"
   CODE_BYTES = 32
 
-  # RFC 8252 §7.3 loopback hosts. The RFC prefers the IP literals over the name
-  # (a name is only as trustworthy as the resolver), but real clients use all
-  # three, and each resolves on the operator's own machine — which is the whole
-  # reason these need no allowlist entry.
-  LOOPBACK_HOSTS = ["127.0.0.1", "::1", "localhost"].freeze
-
   # Query parameters the callback response owns: whatever a client put in its own
   # redirect_uri, these are set by the redirect and not carried over from it.
   RESPONSE_OWNED_QUERY_KEYS = %w[code state].freeze
+
+  # RFC 7636 §4.1: 43–128 unreserved characters. The challenge is §4.2's
+  # base64url of a SHA-256, which is always exactly 43 of the same alphabet.
+  PKCE_VALUE = /\A[A-Za-z0-9\-._~]{43,128}\z/
 
   included do
     # Safe to disable: the token endpoint is called server-to-server without a CSRF
@@ -54,7 +52,18 @@ module McpToolkit::Oauth::ControllerMethods
     # `authorize.html.erb` by implicit render, skipping a body guard entirely and
     # showing an attacker's `redirect_uri` a paste page. Here the check cannot be
     # routed around.
-    before_action :mcp_oauth_validate_request!, only: %i[authorize approve] if respond_to?(:before_action)
+    # Raises rather than skipping when the parent has no filter chain. Skipping
+    # would leave both browser legs unguarded — an open redirect issuing codes to
+    # any URI — and it is the same shape as the scheme denylist this branch
+    # removed for failing open. A guard that installs itself conditionally is not
+    # a guard.
+    unless respond_to?(:before_action)
+      raise McpToolkit::Errors::ConfigurationError,
+            "#{name || "The OAuth bridge's parent"} has no `before_action`; " \
+            "config.oauth_parent_controller must be an ActionController with a filter chain."
+    end
+
+    before_action :mcp_oauth_validate_request!, only: %i[authorize approve]
   end
 
   # `resource` MUST equal the MCP endpoint URL as the operator typed it into the
@@ -95,8 +104,11 @@ module McpToolkit::Oauth::ControllerMethods
     }, status: :created
   end
 
+  # `formats: [:html]` because there is only an HTML template and `Accept` picks
+  # the format just as a `.json` suffix would — without it, `Accept:
+  # application/json` raises MissingTemplate on an unauthenticated endpoint.
   def authorize
-    render :authorize, layout: false
+    render :authorize, layout: false, formats: [:html]
   end
 
   # The token is verified here, not only at exchange, so a typo fails on the page
@@ -116,6 +128,11 @@ module McpToolkit::Oauth::ControllerMethods
 
   def token
     return mcp_oauth_render_token_error("unsupported_grant_type") unless params[:grant_type] == "authorization_code"
+    # Shape first, and BEFORE the code is consumed: a request that could never
+    # verify shouldn't cost a legitimate client its code. A well-formed but WRONG
+    # verifier still burns it below — that is deliberate, and the only thing
+    # stopping someone who intercepted a code from retrying verifiers against it.
+    return mcp_oauth_render_token_error("invalid_request") unless mcp_oauth_verifier_well_formed?
 
     payload = mcp_oauth_consume_code(params[:code].to_s)
     return mcp_oauth_render_token_error("invalid_grant") if payload.nil?
@@ -202,11 +219,21 @@ module McpToolkit::Oauth::ControllerMethods
   # `URI` keeps the brackets on an IPv6 literal (`[::1]`); strip them so the
   # literal compares against the bare form clients actually send.
   def mcp_oauth_loopback_host?(host)
-    LOOPBACK_HOSTS.include?(host.to_s.downcase.delete_prefix("[").delete_suffix("]"))
+    McpToolkit::Oauth.loopback_host?(host)
   end
 
+  # RFC 7636 §4.1/§4.2 shapes, not just presence. This cannot make a client's
+  # PKCE strong — the challenge is a 43-char digest whatever the verifier was, so
+  # a client that chose a one-character verifier is indistinguishable here and has
+  # only defeated its own protection. It is enforced because a public gem should
+  # not quietly accept what the spec forbids, and because a malformed value can
+  # then be refused early rather than after a paste.
   def mcp_oauth_code_challenge_supported?
-    params[:code_challenge].present? && params[:code_challenge_method].to_s == "S256"
+    params[:code_challenge].to_s.match?(PKCE_VALUE) && params[:code_challenge_method].to_s == "S256"
+  end
+
+  def mcp_oauth_verifier_well_formed?
+    params[:code_verifier].to_s.match?(PKCE_VALUE)
   end
 
   # ---- authorization codes --------------------------------------------------
@@ -263,11 +290,15 @@ module McpToolkit::Oauth::ControllerMethods
   # are already high-entropy, so a PBKDF2 run per request would buy nothing.
   #
   # Cipher and serializer are pinned, not inherited: the gem supports
-  # ActiveSupport >= 6.1, where both defaults are Rails-configuration-dependent.
-  # The serializer especially — every default in that range (`:marshal`, and
-  # 7.1+'s `:json_allow_marshal`) reaches `Marshal.load`, so a host with cache
-  # write access forging one blob would get code execution. The payload is already
-  # a JSON String, so NullSerializer leaves JSON.parse the only parser that sees it.
+  # ActiveSupport >= 6.1, where both defaults are Rails-configuration-dependent
+  # (`:marshal`, and 7.1+'s `:json_allow_marshal`). The payload is already a JSON
+  # String, so NullSerializer costs nothing and leaves JSON.parse the only parser
+  # this code hands the plaintext to.
+  #
+  # It does NOT buy immunity from a writable cache: `Cache::Store` marshals the
+  # entry itself, so a store that can be written to is a code-execution problem
+  # before anything here is reached. This is determinism across the supported
+  # range, not a mitigation.
   def mcp_oauth_encryptor(code)
     key = OpenSSL::HMAC.digest("SHA256", mcp_oauth_signing_secret, "#{CODE_CACHE_PREFIX}key:#{code}")
     ActiveSupport::MessageEncryptor.new(
@@ -332,9 +363,10 @@ module McpToolkit::Oauth::ControllerMethods
   # Dropping any inbound `code`/`state` keeps the response OAuth-shaped whatever
   # was passed in.
   #
-  # Built by string, not by `URI#query=`: this value has already been checked by
-  # the redirect policy, so re-parsing it to reconstruct it only invents ways for
-  # the emitted URL to differ from the one that was approved.
+  # The base is taken as the checked string rather than round-tripped through
+  # `URI`, so the host part of what is emitted is byte-identical to what the
+  # policy approved. The query IS re-encoded (`?a=1?b=2` normalises to
+  # `?a=1%3Fb%3D2`), which is the point — that is where `code` gets stripped.
   def mcp_oauth_callback_url(code)
     redirect_uri = params[:redirect_uri].to_s
     base, _, existing = redirect_uri.partition("?")
@@ -345,8 +377,9 @@ module McpToolkit::Oauth::ControllerMethods
   end
 
   # A client's own query survives; the two parameters this response owns do not,
-  # whoever put them there. Malformed escapes are dropped rather than raised on —
-  # the alternative is a 500 after the operator has already pasted their token.
+  # whoever put them there. The rescue is a backstop, not a designed path: both
+  # sanctioned redirect_uris are `URI.parse`d before they reach here, which
+  # already refuses what `decode_www_form` would raise on.
   def mcp_oauth_preserved_query_pairs(query)
     return [] if query.empty?
 
@@ -357,9 +390,14 @@ module McpToolkit::Oauth::ControllerMethods
 
   # ---- responses ------------------------------------------------------------
 
+  # 422 as an integer, not a symbol: the gemspec pins no Rack floor, and neither
+  # symbol spans the range it allows — `:unprocessable_content` raises below Rack
+  # 3.1, `:unprocessable_entity` is deprecated above it. A symbol that raises here
+  # would turn a mistyped paste into an unauthenticated 500 on the one page whose
+  # job is to say "that token isn't valid".
   def mcp_oauth_reject_paste
     @mcp_oauth_error = "That access token is not valid, or it has expired or been revoked."
-    render :authorize, layout: false, status: :unprocessable_content
+    render :authorize, layout: false, formats: [:html], status: 422
   end
 
   def mcp_oauth_render_bad_request(message)

@@ -69,8 +69,10 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
   let(:valid_token) { "tok_live" }
 
   # A verifier and its real S256 challenge, so the PKCE check is exercised against
-  # genuine values rather than a stubbed comparison.
-  let(:code_verifier) { "a-high-entropy-code-verifier-string" }
+  # genuine values rather than a stubbed comparison. RFC 7636 §4.1 shape (43–128
+  # unreserved chars) — the old 35-char value predated the format check and would
+  # now, correctly, be refused.
+  let(:code_verifier) { "a-high-entropy-code-verifier-string-of-legal-length" }
   let(:code_challenge) do
     [Digest::SHA256.digest(code_verifier)].pack("m0").tr("+/", "-_").delete("=")
   end
@@ -89,7 +91,7 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       # Set explicitly because this suite runs without Rails, so the default
       # (`Rails.application.secret_key_base`) has nothing to resolve against —
       # exactly what a non-Rails host faces.
-      c.oauth_signing_secret = "spec-oauth-signing-secret"
+      c.oauth_signing_secret = "spec-oauth-signing-secret-at-least-32-bytes-long"
     end
   end
 
@@ -381,6 +383,54 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       expect { assign("/just/a/path") }.to raise_error(ArgumentError, /names no scheme/)
       expect { assign("ht tp://nonsense") }.to raise_error(ArgumentError, /not a valid URI/)
     end
+
+    # Cleartext to a remote host puts the code on the wire. Cleartext to loopback
+    # never leaves the machine (RFC 8252 §7.3), so that one is allowed.
+    it "rejects cleartext http to a remote host but allows it to loopback" do
+      expect { assign("http://client.example/cb") }.to raise_error(ArgumentError, /cleartext http.*use https/m)
+      expect { assign("http://127.0.0.1:54321/cb") }.not_to raise_error
+      expect { assign("http://localhost:3000/cb") }.not_to raise_error
+    end
+
+    # Naming bad schemes is sound HERE and nowhere else: this list is what the
+    # HOST wrote, so there is no unlisted scheme for an attacker to slip through.
+    it "rejects schemes a browser treats as script or local content" do
+      ["javascript:/alert(1)", "data:/text/html,x", "file:///tmp/cb", "vbscript:/x"].each do |uri|
+        expect { assign(uri) }.to raise_error(ArgumentError, /script or local content/)
+      end
+    end
+
+    # Validation is a gate, not a suggestion: the reader used to hand back a
+    # mutable array, so `<<` slipped an unchecked entry straight past the setter.
+    # A `#frag` entry is not a harmless typo — the emitted `…/cb#frag?code=…` puts
+    # the code in the browser's hash, where the client's server never sees it.
+    it "cannot be bypassed by mutating the list in place" do
+      assign("https://client.example/callback")
+
+      expect(McpToolkit.config.oauth_allowed_redirect_uris).to be_frozen
+      expect { McpToolkit.config.oauth_allowed_redirect_uris << "https://late.example/cb#frag" }
+        .to raise_error(FrozenError)
+    end
+  end
+
+  # The sibling of the allowlist setter, and it skipped the same lesson: a
+  # non-String passed `oauth_bridge?`, drew the routes, and raised a TypeError out
+  # of OpenSSL::HMAC at request time — after the operator had pasted a live token.
+  describe "signing-secret validation at config time" do
+    it "rejects a non-String before it can reach a request" do
+      expect { McpToolkit.config.oauth_signing_secret = 12_345 }
+        .to raise_error(ArgumentError, /must be a String, got Integer/)
+    end
+
+    it "rejects a secret too short to be a real one" do
+      expect { McpToolkit.config.oauth_signing_secret = "short" }
+        .to raise_error(ArgumentError, /bytes; use at least/)
+    end
+
+    it "accepts a realistic secret, and nil (which falls back to secret_key_base)" do
+      expect { McpToolkit.config.oauth_signing_secret = "x" * 128 }.not_to raise_error
+      expect { McpToolkit.config.oauth_signing_secret = nil }.not_to raise_error
+    end
   end
 
   # RFC 6749 §5.1 makes both headers a MUST on any response carrying a token, and
@@ -438,12 +488,15 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       expect(controller.instance_variable_get(:@mcp_oauth_error)).to be_present
     end
 
+    # 422 as an integer: no Rack floor is declared, and neither symbol spans the
+    # supported range (`:unprocessable_content` raises below Rack 3.1,
+    # `:unprocessable_entity` is deprecated above it).
     it "re-renders the page when no token was pasted" do
       controller.params = authorize_params.merge(access_token: "")
       controller.dispatch(:approve)
 
       expect(controller.redirected_to).to be_nil
-      expect(controller.rendered[:options]).to include(status: :unprocessable_content)
+      expect(controller.rendered[:options]).to include(status: 422)
     end
 
     # The hidden fields are attacker-tamperable, so the allowlist is re-checked on
@@ -491,18 +544,43 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
       expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
     end
 
-    it "rejects a code redeemed with the wrong PKCE verifier" do
-      controller.params = exchange_params.merge(code: issue_code, code_verifier: "wrong-verifier")
+    # Well-formed but WRONG: reaches the comparison, fails it, and burns the code.
+    # That burn is the only thing stopping someone who intercepted a code from
+    # retrying verifiers against it, so it is asserted, not incidental.
+    it "rejects a code redeemed with the wrong PKCE verifier, and burns it" do
+      code = issue_code
+      wrong = "a-wrong-but-perfectly-well-formed-code-verifier"
+      controller.params = exchange_params.merge(code:, code_verifier: wrong)
       controller.token
 
       expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
+
+      # Spent, even though the exchange failed.
+      controller.params = exchange_params.merge(code:)
+      controller.token
+      expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
+    end
+
+    # MALFORMED is refused before the code is touched — a request that could never
+    # verify must not cost a legitimate client its code.
+    it "refuses a malformed verifier without burning the code" do
+      code = issue_code
+      controller.params = exchange_params.merge(code:, code_verifier: "too-short")
+      controller.token
+
+      expect(controller.rendered[:options][:json]).to eq(error: "invalid_request")
+
+      # Still redeemable with the real verifier.
+      controller.params = exchange_params.merge(code:)
+      controller.token
+      expect(controller.rendered[:options][:json]).to eq(access_token: valid_token, token_type: "Bearer")
     end
 
     it "rejects a code redeemed with no PKCE verifier at all" do
       controller.params = exchange_params.merge(code: issue_code, code_verifier: nil)
       controller.token
 
-      expect(controller.rendered[:options][:json]).to eq(error: "invalid_grant")
+      expect(controller.rendered[:options][:json]).to eq(error: "invalid_request")
     end
 
     it "rejects a code redeemed against a different redirect_uri than it was issued for" do

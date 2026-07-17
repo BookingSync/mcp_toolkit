@@ -160,29 +160,31 @@ class McpToolkit::Configuration
   # @return [Array<String>]
   attr_reader :oauth_allowed_redirect_uris
 
-  # Assigns the allowlist, rejecting an entry the bridge could not actually
+  # Assigns the allowlist, rejecting an entry the bridge must not, or could not,
   # redirect to. Validated at CONFIG time for the same reason
   # `filter_operator_overrides=` is: the alternative is a request-time failure,
   # and here that failure lands at the worst possible moment — the authorize page
   # renders, the operator pastes a live token, the token is verified, a code is
-  # written to the cache, and only THEN does building the callback URL raise. A
-  # typo would cost the operator their paste and leave an orphaned code behind.
+  # written to the cache, and only THEN does the callback URL turn out to be
+  # unusable. A typo would cost the operator their paste.
   #
-  # Rejected: anything unparseable, anything with no scheme (a bare path is not a
-  # redirect target), a fragment (OAuth forbids one on a redirect_uri), and an
-  # OPAQUE URI — `com.example.app:cb` rather than `com.example.app:/cb`. The last
-  # is the sharp one, because the docs actively invite private-use schemes into
-  # this list and the opaque form is legal URI syntax; it simply cannot carry a
-  # query, so no code could ever reach it.
+  # The result is FROZEN, so validation is a gate rather than a suggestion: an
+  # `<<` onto the reader would otherwise slip an unchecked entry straight past
+  # this method. (`config.oauth_allowed_redirect_uris << "…#frag"` used to work,
+  # and a fragment is not a harmless typo — the emitted `…/cb#frag?code=…` puts
+  # the code in the browser's HASH, so it never reaches the client's server and
+  # is readable by any script on the page.)
+  #
+  # See `oauth_redirect_uri_problem` for what is rejected and why.
   def oauth_allowed_redirect_uris=(uris)
-    @oauth_allowed_redirect_uris = Array(uris).map(&:to_s).each do |uri|
+    entries = Array(uris).map { |uri| uri.to_s.dup.freeze }
+    entries.each do |uri|
       problem = oauth_redirect_uri_problem(uri)
       next unless problem
 
-      raise ArgumentError,
-            "oauth_allowed_redirect_uris contains #{uri.inspect}, which the bridge could never redirect to: " \
-            "#{problem}"
+      raise ArgumentError, "oauth_allowed_redirect_uris contains #{uri.inspect}: #{problem}"
     end
+    @oauth_allowed_redirect_uris = entries.freeze
   end
 
   # Permits LOOPBACK redirect targets on any port without naming each one:
@@ -252,11 +254,34 @@ class McpToolkit::Configuration
   #
   #   c.oauth_signing_secret = ENV.fetch("MCP_OAUTH_SIGNING_SECRET")
   #
+  # Use `fetch`, not `ENV["..."]`: a nil from a missing var falls back to
+  # `secret_key_base` silently, leaving a host believing it runs a dedicated
+  # secret when it does not.
+  #
   # Rotating it invalidates in-flight codes (a 60s window), nothing else — the
   # tokens themselves are the host's and are untouched.
   #
   # @return [String, nil]
-  attr_writer :oauth_signing_secret
+  #
+  # Validated at assignment, like `oauth_allowed_redirect_uris=` — a non-String
+  # here passed `oauth_bridge?`, drew the routes, and then raised a TypeError out
+  # of `OpenSSL::HMAC` at request time: after the operator pasted a live token and
+  # a code was already cached. That is the exact failure the sibling setter exists
+  # to prevent, so it gets the same treatment.
+  def oauth_signing_secret=(secret)
+    raise ArgumentError, "oauth_signing_secret must be a String, got #{secret.class}" if secret && !secret.is_a?(String)
+
+    if secret.is_a?(String) && !secret.empty? && secret.bytesize < MINIMUM_SIGNING_SECRET_BYTES
+      raise ArgumentError,
+            "oauth_signing_secret is #{secret.bytesize} bytes; use at least " \
+            "#{MINIMUM_SIGNING_SECRET_BYTES} (a real secret_key_base is 128)"
+    end
+
+    @oauth_signing_secret = secret
+  end
+
+  # Short enough to admit any real secret, long enough to catch a placeholder.
+  MINIMUM_SIGNING_SECRET_BYTES = 32
 
   # Reads the configured secret, else the Rails app's `secret_key_base`. Resolved
   # lazily rather than in the initializer: the gem loads before a Rails app is
@@ -830,17 +855,43 @@ class McpToolkit::Configuration
     Array(oauth_allowed_redirect_uris).any? || !!oauth_allow_loopback_redirects
   end
 
-  # Why a given allowlist entry could never receive a code, or nil if it could.
+  # Why a given allowlist entry must not or cannot receive a code, or nil if it
+  # may. A lint over values the HOST wrote, not a boundary against an attacker —
+  # which is why naming bad schemes is sound here and would not be at request
+  # time: nothing an attacker sends reaches this list, so there is no unlisted
+  # scheme for them to slip through. (Request-time policy takes the opposite
+  # shape for exactly that reason — see
+  # McpToolkit::Oauth::ControllerMethods#mcp_oauth_loopback_redirect_uri?.)
   def oauth_redirect_uri_problem(uri)
     parsed = oauth_parse_redirect_uri(uri)
     return "it is not a valid URI" if parsed.nil?
 
-    return "it names no scheme" if parsed.scheme.nil?
+    scheme = parsed.scheme&.downcase
+    return "it names no scheme" if scheme.nil?
     return "it carries a fragment, which OAuth forbids on a redirect_uri" unless parsed.fragment.nil?
-    return nil if parsed.opaque.nil?
+    unless parsed.opaque.nil?
+      return "it is opaque (#{scheme}:#{parsed.opaque}) so it cannot carry the code — " \
+             "write it with a path, e.g. #{scheme}:/#{parsed.opaque}"
+    end
 
-    "it is opaque (#{parsed.scheme}:#{parsed.opaque}) so it cannot carry the code — " \
-      "write it with a path, e.g. #{parsed.scheme}:/#{parsed.opaque}"
+    oauth_redirect_scheme_problem(scheme, parsed)
+  end
+
+  # Schemes a browser may treat as script or local content. A code handed to one
+  # is at best lost and at worst executed; no client legitimately registers one.
+  ACTIVE_CONTENT_SCHEMES = %w[javascript data vbscript file blob about view-source].freeze
+
+  def oauth_redirect_scheme_problem(scheme, parsed)
+    if ACTIVE_CONTENT_SCHEMES.include?(scheme)
+      return "#{scheme}: is not a redirect target — a browser treats it as script or local content"
+    end
+    return nil unless scheme == "http"
+    # RFC 8252 §7.3: cleartext is fine to a loopback address, which never leaves
+    # the operator's machine. Anywhere else it puts the code on the wire.
+    return nil if McpToolkit::Oauth.loopback_host?(parsed.host)
+
+    "it is cleartext http to a remote host, which would put the authorization code on the wire — " \
+      "use https (cleartext is only accepted for loopback)"
   end
 
   def oauth_parse_redirect_uri(uri)
