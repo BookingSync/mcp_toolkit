@@ -1,3 +1,36 @@
+## [0.6.1] - 2026-07-18
+
+Serves the OAuth metadata documents at the path-APPENDED discovery locations too,
+so a client that appends the well-known segment after the resource path
+(`<mcp>/.well-known/oauth-authorization-server`) discovers the authorization
+server just as one that inserts it before (`/.well-known/oauth-authorization-server/mcp`)
+does. Additive and bridge-gated: a host with the bridge off is unaffected, and one
+with it on gains the aliases with no configuration change.
+
+### Fixed
+
+- **Authorization-server discovery for clients that path-APPEND the well-known
+  segment.** For an MCP endpoint at `https://host/mcp`, the issuer is path-ful,
+  and RFC 8414 §3.1 places its metadata at the path-INSERTED
+  `/.well-known/oauth-authorization-server/mcp` — which the bridge already served.
+  But some MCP clients (observed with a hosted client in the wild) instead request
+  the path-APPENDED `https://host/mcp/.well-known/oauth-authorization-server`, got
+  a 404 with no fallback, never obtained a `registration_endpoint`, and reported a
+  registration failure. The bridge now answers the metadata at BOTH forms.
+
+### Added
+
+- **Path-appended metadata routes under the engine mount** (drawn only when
+  `oauth_bridge?`): `GET <mcp>/.well-known/oauth-authorization-server`,
+  `GET <mcp>/.well-known/oauth-protected-resource`, and the OIDC discovery alias
+  `GET <mcp>/.well-known/openid-configuration` (which returns the
+  authorization-server document). All stay UNDER the mount, so they claim nothing
+  origin-global and cannot collide with an OAuth provider the host already runs;
+  the RFC 8414 path-inserted documents the host draws at the origin root are
+  unchanged. Every identifier is still derived from the live request origin, so
+  the document served at an appended location is byte-identical to the inserted
+  one, and both carry `Cache-Control: no-store`.
+
 ## [0.6.0] - 2026-07-16
 
 An OAuth 2.1 authorization bridge for the authority role, so hosted MCP clients

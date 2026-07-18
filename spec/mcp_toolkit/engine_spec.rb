@@ -179,7 +179,14 @@ RSpec.describe "Mountable engine + gem controller" do
       [:get, "oauth/authorize", "oauth#authorize"],
       [:post, "oauth/authorize", "oauth#approve"],
       [:post, "oauth/token", "oauth#token"],
-      [:post, "oauth/register", "oauth#register"]
+      [:post, "oauth/register", "oauth#register"],
+      # The metadata documents served path-APPENDED under the mount, for clients
+      # that append the well-known segment after the resource path rather than
+      # inserting it. Gated with the rest of the bridge; format segment disabled
+      # like the rest (the checks below fold these in via `oauth_routes`).
+      [:get, ".well-known/oauth-authorization-server", "oauth#authorization_server"],
+      [:get, ".well-known/oauth-protected-resource", "oauth#protected_resource"],
+      [:get, ".well-known/openid-configuration", "oauth#authorization_server"]
     ]
 
     it "does NOT draw the OAuth bridge for an authority that has not opted in" do

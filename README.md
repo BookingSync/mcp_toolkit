@@ -543,15 +543,25 @@ origin-global.** The flow endpoints live under the engine's mount
 `/oauth/*` — as an app with Doorkeeper for its own API does — you keep every one of
 those routes.
 
-The metadata documents are **path-scoped** to the mount
-(`/.well-known/oauth-protected-resource/mcp`), never the bare
-`/.well-known/oauth-authorization-server`. That matters: the bare paths are
-origin-global and mean *"the authorization server of this whole origin"*, which
-belongs to a provider you already run, not to an MCP server sharing the host.
+The metadata documents are **path-scoped** to the mount, never the bare
+origin-global `/.well-known/oauth-authorization-server`. That matters: the bare
+paths are origin-global and mean *"the authorization server of this whole origin"*,
+which belongs to a provider you already run, not to an MCP server sharing the host.
 RFC 8414 §3.1 exists for exactly this — *"Using path components enables supporting
 multiple issuers per host"* — and the MCP authorization spec (2025-11-25) requires
 a client given a path-ful issuer to try the path-**inserted** URLs, with no root
 fallback. So the issuer is your MCP endpoint URL, and both documents hang off it.
+
+A path-ful issuer, though, has two readings of *where* under the origin its
+metadata lives, and MCP clients disagree: some **insert** the well-known segment
+before the resource path (`/.well-known/oauth-authorization-server/mcp` — the RFC
+form the host draws), others **append** it after
+(`/mcp/.well-known/oauth-authorization-server`). The bridge serves both: the
+inserted forms at the origin root (`draw_oauth_metadata_routes`), and the appended
+forms — plus the `openid-configuration` OIDC alias — under the engine mount,
+automatically whenever the bridge is on. Both stay path-scoped and claim nothing
+origin-global; a client discovers the authorization server whichever convention it
+follows.
 
 If your MCP endpoint IS its origin root (a dedicated MCP domain), there is no path
 to insert and you get the bare paths — correct there, since your server really is

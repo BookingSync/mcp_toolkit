@@ -161,6 +161,23 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     session.get("/.well-known/oauth-authorization-server")
     result["bare_as_status"] = session.last_response.status
 
+    # 3b. The SAME documents, served path-APPENDED under the mount, for a client
+    # that appends the well-known segment after the resource path instead of
+    # inserting it. These stay under the mount, so they are additive to the
+    # inserted forms and claim nothing origin-global.
+    session.get("/mcp/.well-known/oauth-authorization-server")
+    result["appended_as_status"] = session.last_response.status
+    result["appended_as"] = JSON.parse(session.last_response.body)
+    result["appended_as_cache_control"] = session.last_response.headers["Cache-Control"]
+
+    session.get("/mcp/.well-known/oauth-protected-resource")
+    result["appended_prm_status"] = session.last_response.status
+    result["appended_prm"] = JSON.parse(session.last_response.body)
+
+    session.get("/mcp/.well-known/openid-configuration")
+    result["appended_oidc_status"] = session.last_response.status
+    result["appended_oidc"] = JSON.parse(session.last_response.body)
+
     # 4. Client registration.
     session.post("/mcp/oauth/register", JSON.generate({ redirect_uris: [REDIRECT_URI] }),
                  "CONTENT_TYPE" => "application/json")
@@ -323,7 +340,10 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     it "keeps every one of its own endpoints under the engine mount" do
       expect(@result.fetch("engine_paths")).to contain_exactly(
         "/", "/", "/", "/health", "/tokens/introspect",
-        "/oauth/authorize", "/oauth/authorize", "/oauth/token", "/oauth/register"
+        "/oauth/authorize", "/oauth/authorize", "/oauth/token", "/oauth/register",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/openid-configuration"
       )
     end
   end
@@ -472,6 +492,36 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     it "leaves BOTH origin-global well-known paths unclaimed" do
       expect(@result.fetch("bare_prm_status")).to eq(404)
       expect(@result.fetch("bare_as_status")).to eq(404)
+    end
+
+    # A client that appends the well-known segment after the resource path gets the
+    # same documents as one that inserts it — the byte-identical issuer + endpoints,
+    # and the same no-store — so discovery succeeds under either convention.
+    it "also answers authorization-server metadata at the path-APPENDED location" do
+      expect(@result.fetch("appended_as_status")).to eq(200)
+      expect(@result.fetch("appended_as")).to include(
+        "issuer" => "http://example.org/mcp",
+        "authorization_endpoint" => "http://example.org/mcp/oauth/authorize",
+        "token_endpoint" => "http://example.org/mcp/oauth/token",
+        "registration_endpoint" => "http://example.org/mcp/oauth/register"
+      )
+      expect(@result.fetch("appended_as_cache_control")).to eq("no-store")
+    end
+
+    it "also answers protected-resource metadata at the path-APPENDED location" do
+      expect(@result.fetch("appended_prm_status")).to eq(200)
+      expect(@result.fetch("appended_prm")).to include(
+        "resource" => "http://example.org/mcp",
+        "authorization_servers" => ["http://example.org/mcp"]
+      )
+    end
+
+    it "answers the OIDC discovery alias with the authorization-server document" do
+      expect(@result.fetch("appended_oidc_status")).to eq(200)
+      expect(@result.fetch("appended_oidc")).to include(
+        "issuer" => "http://example.org/mcp",
+        "registration_endpoint" => "http://example.org/mcp/oauth/register"
+      )
     end
   end
 

@@ -38,17 +38,31 @@ McpToolkit::Engine.routes.draw do
   # route above: the routes file is evaluated through the routes_reloader, after
   # the host's initializers/to_prepare, so the config is already set.
   #
-  # The two metadata documents are NOT here: a client looks for them at the origin
-  # root, which an engine mounted under a path cannot draw. The host draws them
-  # with `McpToolkit.draw_oauth_metadata_routes(self)`.
-  # `format: false` on each, as on the metadata routes the host draws: without it
-  # Rails' optional `(.:format)` segment matches, so `/mcp/oauth/authorize.json`
-  # reaches the action, finds no JSON template, and 500s — an unauthenticated
-  # error on a public endpoint, for a format the bridge never speaks.
+  # `format: false` on each: without it Rails' optional `(.:format)` segment
+  # matches, so `/mcp/oauth/authorize.json` reaches the action, finds no JSON
+  # template, and 500s — an unauthenticated error on a public endpoint, for a
+  # format the bridge never speaks.
   if McpToolkit.config.oauth_bridge?
     get "oauth/authorize", to: "oauth#authorize", format: false
     post "oauth/authorize", to: "oauth#approve", format: false
     post "oauth/token", to: "oauth#token", format: false
     post "oauth/register", to: "oauth#register", format: false
+
+    # The metadata documents, ALSO served path-APPENDED to the mount
+    # (`/mcp/.well-known/oauth-authorization-server`), in addition to the RFC 8414
+    # §3.1 / RFC 9728 §3.1 path-INSERTED locations the host draws at the origin
+    # root via `McpToolkit.draw_oauth_metadata_routes`. A path-ful issuer has two
+    # readings of where its metadata lives, and MCP clients disagree: some INSERT
+    # the well-known segment before the resource path (the RFC form), others APPEND
+    # it after. Observed in the wild — a hosted client requesting
+    # `<mcp>/.well-known/oauth-authorization-server` and getting a 404 it could not
+    # recover from, so it never reached registration. Serving both meets either
+    # convention. Unlike the origin-root bare paths, these stay UNDER the mount, so
+    # they claim nothing origin-global and cannot collide with an OAuth provider
+    # the host already runs. `openid-configuration` is the OIDC discovery alias a
+    # client may probe instead; it answers the same authorization-server document.
+    get ".well-known/oauth-authorization-server", to: "oauth#authorization_server", format: false
+    get ".well-known/oauth-protected-resource", to: "oauth#protected_resource", format: false
+    get ".well-known/openid-configuration", to: "oauth#authorization_server", format: false
   end
 end
