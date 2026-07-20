@@ -178,8 +178,14 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     result["appended_oidc_status"] = session.last_response.status
     result["appended_oidc"] = JSON.parse(session.last_response.body)
 
-    # 4. Client registration.
-    session.post("/mcp/oauth/register", JSON.generate({ redirect_uris: [REDIRECT_URI] }),
+    # 4. Client registration. Asks for more than the bridge honours, so the
+    #    response below exercises substitution over a real request cycle rather
+    #    than the defaults an empty body would take.
+    session.post("/mcp/oauth/register",
+                 JSON.generate({ redirect_uris: [REDIRECT_URI],
+                                 grant_types: %w[authorization_code refresh_token],
+                                 response_types: %w[code token],
+                                 token_endpoint_auth_method: "client_secret_post" }),
                  "CONTENT_TYPE" => "application/json")
     result["register_status"] = session.last_response.status
     result["register"] = JSON.parse(session.last_response.body)
@@ -535,14 +541,23 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     # registered come back, and abandons a registration that drops them. Echoing
     # them registers nothing — the allowlist still gates authorize/token — but a
     # client that requires the echo can now complete registration.
-    it "echoes the submitted redirect_uris and RFC 7591 client fields" do
+    it "echoes the submitted redirect_uris" do
       register = @result.fetch("register")
 
       expect(register["redirect_uris"]).to eq(["https://client.example/callback"])
-      expect(register["client_id_expires_at"]).to eq(0)
       expect(register["client_id_issued_at"]).to be_a(Integer)
+    end
+
+    # The request asked for refresh_token, an implicit response type and a secret
+    # this server never issues. Stating them back would promise flows the token
+    # endpoint rejects, and contradict the very document that named this endpoint.
+    it "states only what it honours, whatever the client asked to register" do
+      register = @result.fetch("register")
+
       expect(register["grant_types"]).to eq(["authorization_code"])
       expect(register["response_types"]).to eq(["code"])
+      expect(register["token_endpoint_auth_method"]).to eq("none")
+      expect(register).not_to have_key("client_id_expires_at")
     end
   end
 

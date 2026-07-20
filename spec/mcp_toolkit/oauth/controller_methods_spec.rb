@@ -215,25 +215,44 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
     # come back, and abandons a registration that drops them. Echoing them
     # authorizes nothing — authorize/token still gate every redirect_uri against
     # the allowlist (see the #authorize examples below).
-    it "echoes the submitted redirect_uris and client metadata" do
-      controller.params = {
-        redirect_uris: [redirect_uri],
-        grant_types: %w[authorization_code refresh_token],
-        response_types: ["code"],
-        token_endpoint_auth_method: "client_secret_post",
-        client_name: "Some Client"
-      }
+    it "echoes the submitted redirect_uris and client_name" do
+      controller.params = { redirect_uris: [redirect_uri], client_name: "Some Client" }
       controller.register
 
       expect(controller.rendered[:options][:json]).to include(
         redirect_uris: [redirect_uri],
-        grant_types: %w[authorization_code refresh_token],
-        response_types: ["code"],
-        token_endpoint_auth_method: "client_secret_post",
-        client_name: "Some Client",
-        client_id_expires_at: 0
+        client_name: "Some Client"
       )
       expect(controller.rendered[:options][:json][:client_id_issued_at]).to be_a(Integer)
+    end
+
+    # RFC 7591 §3.2.1 states the metadata as REGISTERED, not as requested. Echoing
+    # a grant this server rejects would promise the client a flow #token answers
+    # `unsupported_grant_type`, and echoing an auth method would confirm a
+    # credential no client here holds — no client_secret is ever issued.
+    it "substitutes grant/response types it does not support rather than echoing them" do
+      controller.params = {
+        grant_types: %w[authorization_code refresh_token],
+        response_types: %w[code token],
+        token_endpoint_auth_method: "client_secret_post"
+      }
+      controller.register
+
+      expect(controller.rendered[:options][:json]).to include(
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none"
+      )
+    end
+
+    it "falls back to the supported defaults when the client asks for nothing it honours" do
+      controller.params = { grant_types: ["client_credentials"], response_types: ["token"] }
+      controller.register
+
+      expect(controller.rendered[:options][:json]).to include(
+        grant_types: ["authorization_code"],
+        response_types: ["code"]
+      )
     end
 
     it "defaults the grant/response types and auth method when the client sends none" do
@@ -245,6 +264,26 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
         response_types: ["code"],
         token_endpoint_auth_method: "none"
       )
+    end
+
+    # The client fetched this endpoint FROM the discovery document, so the two
+    # disagreeing is the server contradicting itself — the defect the substitution
+    # above exists to prevent, pinned against both documents at once.
+    it "states nothing the discovery document does not advertise as supported" do
+      controller.params = {
+        grant_types: %w[authorization_code refresh_token],
+        response_types: %w[code token],
+        token_endpoint_auth_method: "private_key_jwt"
+      }
+      controller.register
+      registered = controller.rendered[:options][:json]
+      controller.authorization_server
+      advertised = controller.rendered[:options][:json]
+
+      expect(registered[:grant_types] - advertised[:grant_types_supported]).to be_empty
+      expect(registered[:response_types] - advertised[:response_types_supported]).to be_empty
+      expect(advertised[:token_endpoint_auth_methods_supported])
+        .to include(registered[:token_endpoint_auth_method])
     end
   end
 

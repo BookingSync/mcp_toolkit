@@ -3,9 +3,9 @@
 Two additive fixes for hosted MCP clients whose OAuth setup could not complete
 against the 0.6.0 bridge: it now answers the metadata documents at the path-APPENDED
 discovery locations as well as the RFC 8414 path-inserted ones, and its Dynamic
-Client Registration response echoes the client's submitted metadata (per RFC 7591)
-instead of returning a bare `client_id`. Both are bridge-gated and change nothing
-for a host with the bridge off, or for a client that already worked.
+Client Registration response now states the registration (per RFC 7591) instead of
+returning a bare `client_id`. Both are bridge-gated and change nothing for a host
+with the bridge off, or for a client that already worked.
 
 ### Fixed
 
@@ -18,17 +18,24 @@ for a host with the bridge off, or for a client that already worked.
   a 404 with no fallback, never obtained a `registration_endpoint`, and reported a
   registration failure. The bridge now answers the metadata at BOTH forms.
 
-- **Dynamic Client Registration response now echoes the registered metadata.**
-  The stub returned only a `client_id` (plus a fixed auth method and grant/response
-  types). A strict client validates that the `redirect_uris` it registered come
-  back and abandons a registration that drops them — a plausible cause of the same
-  "couldn't register" failure, independent of the discovery gap above. `register`
-  now reflects the client's `redirect_uris`, `token_endpoint_auth_method`,
-  `grant_types`, `response_types` and `client_name`, and adds `client_id_issued_at`
-  / `client_id_expires_at: 0` (RFC 7591 §3.2.1). Echoing AUTHORIZES nothing: the
-  bridge still stores no client, and `authorize`/`token` check every `redirect_uri`
-  against the host allowlist independently, so a value reflected here is not thereby
-  permitted.
+- **Dynamic Client Registration response now states the registration.** The stub
+  returned only a `client_id`. A strict client validates that the `redirect_uris`
+  it registered come back and abandons a registration that drops them — a plausible
+  cause of the same "couldn't register" failure, independent of the discovery gap
+  above. `register` now returns the client's `redirect_uris` and `client_name`
+  alongside `client_id_issued_at` (RFC 7591 §3.2.1). Echoing a `redirect_uri`
+  AUTHORIZES nothing: the bridge still stores no client, and `authorize`/`token`
+  check every one against the host allowlist independently, so a value reflected
+  here is not thereby permitted.
+
+  The `token_endpoint_auth_method` and the grant/response types are **substituted,
+  not echoed** — RFC 7591 §3.2.1 states the metadata as REGISTERED and lets a server
+  replace what it does not support. Reflecting the client's request would contradict
+  the discovery document that named this endpoint (`token_endpoint_auth_methods_supported:
+  ["none"]`, `grant_types_supported: ["authorization_code"]`) and promise a flow the
+  token endpoint rejects — a reflected `refresh_token` is a refresh answered
+  `unsupported_grant_type`. The supported sets are now named once and shared by both
+  documents, so they cannot drift apart.
 
 ### Added
 
