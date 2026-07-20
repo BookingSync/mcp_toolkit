@@ -37,6 +37,12 @@ module McpToolkit::Oauth::ControllerMethods
   # base64url of a SHA-256, which is always exactly 43 of the same alphabet.
   PKCE_VALUE = /\A[A-Za-z0-9\-._~]{43,128}\z/
 
+  # What the token endpoint actually honours. Named once because the discovery
+  # document and the registration response MUST agree — a client reads the first
+  # to find the second, so a disagreement is this server contradicting itself.
+  SUPPORTED_GRANT_TYPES = %w[authorization_code].freeze
+  SUPPORTED_RESPONSE_TYPES = %w[code].freeze
+
   included do
     # Safe to disable: the token endpoint is called server-to-server without a CSRF
     # token, and `approve` never acts on ambient authority — it reads no session and
@@ -86,22 +92,38 @@ module McpToolkit::Oauth::ControllerMethods
       authorization_endpoint: mcp_oauth_endpoint_url("authorize"),
       token_endpoint: mcp_oauth_endpoint_url("token"),
       registration_endpoint: mcp_oauth_endpoint_url("register"),
-      response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code"],
+      response_types_supported: SUPPORTED_RESPONSE_TYPES,
+      grant_types_supported: SUPPORTED_GRANT_TYPES,
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"]
     }
   end
 
-  # Stateless: persisting a `client_id` nothing reads would only grow a table of
-  # strings the bridge never consults.
+  # Stateless: nothing here is persisted (no endpoint reads a `client_id`). The
+  # response still names the `redirect_uris` the client sent, because a strict
+  # client validates that they come back and abandons a registration that drops
+  # them — the failure a hosted client hit against the pre-0.6.1 stub, which
+  # returned only a `client_id`. That echo AUTHORIZES nothing: `authorize` and
+  # `token` check every `redirect_uri` against the host's allowlist independently.
+  #
+  # The auth method and the grant/response types are SUBSTITUTED rather than
+  # echoed — RFC 7591 §3.2.1 states the metadata as REGISTERED, and lets a server
+  # replace what it does not support. Reflecting the client's request instead
+  # would contradict `authorization_server`, which is where that client got this
+  # endpoint, and would promise a flow `token` rejects: a `refresh_token` echoed
+  # back is a refresh answered `unsupported_grant_type`. No `client_secret` is
+  # issued, so `none` is the only auth method a client here could perform.
   def register
-    render json: {
+    body = {
       client_id: SecureRandom.uuid,
+      client_id_issued_at: Time.now.to_i,
+      redirect_uris: mcp_oauth_param_list(:redirect_uris),
       token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code"],
-      response_types: ["code"]
-    }, status: :created
+      grant_types: mcp_oauth_registered_subset(:grant_types, SUPPORTED_GRANT_TYPES),
+      response_types: mcp_oauth_registered_subset(:response_types, SUPPORTED_RESPONSE_TYPES)
+    }
+    body[:client_name] = params[:client_name].to_s if params[:client_name].present?
+    render json: body, status: :created
   end
 
   # `formats: [:html]` because there is only an HTML template and `Accept` picks
@@ -149,6 +171,19 @@ module McpToolkit::Oauth::ControllerMethods
 
   def mcp_oauth_config
     McpToolkit.config
+  end
+
+  # A registration parameter as a plain array of strings — RFC 7591 lists arrive
+  # as JSON arrays; empty when the client sent none.
+  def mcp_oauth_param_list(key)
+    Array(params[key]).map(&:to_s)
+  end
+
+  # What the client asked for, narrowed to what this server honours. A client that
+  # asked for NOTHING supported gets the default rather than an empty array, which
+  # would state a registration able to do nothing at all.
+  def mcp_oauth_registered_subset(key, supported)
+    (mcp_oauth_param_list(key) & supported).presence || supported
   end
 
   # ---- request validation ---------------------------------------------------

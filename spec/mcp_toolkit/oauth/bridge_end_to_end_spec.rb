@@ -161,8 +161,31 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     session.get("/.well-known/oauth-authorization-server")
     result["bare_as_status"] = session.last_response.status
 
-    # 4. Client registration.
-    session.post("/mcp/oauth/register", JSON.generate({ redirect_uris: [REDIRECT_URI] }),
+    # 3b. The SAME documents, served path-APPENDED under the mount, for a client
+    # that appends the well-known segment after the resource path instead of
+    # inserting it. These stay under the mount, so they are additive to the
+    # inserted forms and claim nothing origin-global.
+    session.get("/mcp/.well-known/oauth-authorization-server")
+    result["appended_as_status"] = session.last_response.status
+    result["appended_as"] = JSON.parse(session.last_response.body)
+    result["appended_as_cache_control"] = session.last_response.headers["Cache-Control"]
+
+    session.get("/mcp/.well-known/oauth-protected-resource")
+    result["appended_prm_status"] = session.last_response.status
+    result["appended_prm"] = JSON.parse(session.last_response.body)
+
+    session.get("/mcp/.well-known/openid-configuration")
+    result["appended_oidc_status"] = session.last_response.status
+    result["appended_oidc"] = JSON.parse(session.last_response.body)
+
+    # 4. Client registration. Asks for more than the bridge honours, so the
+    #    response below exercises substitution over a real request cycle rather
+    #    than the defaults an empty body would take.
+    session.post("/mcp/oauth/register",
+                 JSON.generate({ redirect_uris: [REDIRECT_URI],
+                                 grant_types: %w[authorization_code refresh_token],
+                                 response_types: %w[code token],
+                                 token_endpoint_auth_method: "client_secret_post" }),
                  "CONTENT_TYPE" => "application/json")
     result["register_status"] = session.last_response.status
     result["register"] = JSON.parse(session.last_response.body)
@@ -323,7 +346,10 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     it "keeps every one of its own endpoints under the engine mount" do
       expect(@result.fetch("engine_paths")).to contain_exactly(
         "/", "/", "/", "/health", "/tokens/introspect",
-        "/oauth/authorize", "/oauth/authorize", "/oauth/token", "/oauth/register"
+        "/oauth/authorize", "/oauth/authorize", "/oauth/token", "/oauth/register",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/openid-configuration"
       )
     end
   end
@@ -473,12 +499,65 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       expect(@result.fetch("bare_prm_status")).to eq(404)
       expect(@result.fetch("bare_as_status")).to eq(404)
     end
+
+    # A client that appends the well-known segment after the resource path gets the
+    # same documents as one that inserts it — the byte-identical issuer + endpoints,
+    # and the same no-store — so discovery succeeds under either convention.
+    it "also answers authorization-server metadata at the path-APPENDED location" do
+      expect(@result.fetch("appended_as_status")).to eq(200)
+      expect(@result.fetch("appended_as")).to include(
+        "issuer" => "http://example.org/mcp",
+        "authorization_endpoint" => "http://example.org/mcp/oauth/authorize",
+        "token_endpoint" => "http://example.org/mcp/oauth/token",
+        "registration_endpoint" => "http://example.org/mcp/oauth/register"
+      )
+      expect(@result.fetch("appended_as_cache_control")).to eq("no-store")
+    end
+
+    it "also answers protected-resource metadata at the path-APPENDED location" do
+      expect(@result.fetch("appended_prm_status")).to eq(200)
+      expect(@result.fetch("appended_prm")).to include(
+        "resource" => "http://example.org/mcp",
+        "authorization_servers" => ["http://example.org/mcp"]
+      )
+    end
+
+    it "answers the OIDC discovery alias with the authorization-server document" do
+      expect(@result.fetch("appended_oidc_status")).to eq(200)
+      expect(@result.fetch("appended_oidc")).to include(
+        "issuer" => "http://example.org/mcp",
+        "registration_endpoint" => "http://example.org/mcp/oauth/register"
+      )
+    end
   end
 
   describe "registration" do
     it "accepts a JSON registration and returns a client_id" do
       expect(@result.fetch("register_status")).to eq(201)
       expect(@result.fetch("register")["client_id"]).to be_a(String).and be_present
+    end
+
+    # RFC 7591 §3.2.1: a strict client validates that the redirect_uris it
+    # registered come back, and abandons a registration that drops them. Echoing
+    # them registers nothing — the allowlist still gates authorize/token — but a
+    # client that requires the echo can now complete registration.
+    it "echoes the submitted redirect_uris" do
+      register = @result.fetch("register")
+
+      expect(register["redirect_uris"]).to eq(["https://client.example/callback"])
+      expect(register["client_id_issued_at"]).to be_a(Integer)
+    end
+
+    # The request asked for refresh_token, an implicit response type and a secret
+    # this server never issues. Stating them back would promise flows the token
+    # endpoint rejects, and contradict the very document that named this endpoint.
+    it "states only what it honours, whatever the client asked to register" do
+      register = @result.fetch("register")
+
+      expect(register["grant_types"]).to eq(["authorization_code"])
+      expect(register["response_types"]).to eq(["code"])
+      expect(register["token_endpoint_auth_method"]).to eq("none")
+      expect(register).not_to have_key("client_id_expires_at")
     end
   end
 
