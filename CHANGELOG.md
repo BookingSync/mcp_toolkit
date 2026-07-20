@@ -1,11 +1,11 @@
-## [0.6.1] - 2026-07-18
+## [0.6.1] - 2026-07-20
 
-Serves the OAuth metadata documents at the path-APPENDED discovery locations too,
-so a client that appends the well-known segment after the resource path
-(`<mcp>/.well-known/oauth-authorization-server`) discovers the authorization
-server just as one that inserts it before (`/.well-known/oauth-authorization-server/mcp`)
-does. Additive and bridge-gated: a host with the bridge off is unaffected, and one
-with it on gains the aliases with no configuration change.
+Two additive fixes for hosted MCP clients whose OAuth setup could not complete
+against the 0.6.0 bridge: it now answers the metadata documents at the path-APPENDED
+discovery locations as well as the RFC 8414 path-inserted ones, and its Dynamic
+Client Registration response echoes the client's submitted metadata (per RFC 7591)
+instead of returning a bare `client_id`. Both are bridge-gated and change nothing
+for a host with the bridge off, or for a client that already worked.
 
 ### Fixed
 
@@ -17,6 +17,18 @@ with it on gains the aliases with no configuration change.
   the path-APPENDED `https://host/mcp/.well-known/oauth-authorization-server`, got
   a 404 with no fallback, never obtained a `registration_endpoint`, and reported a
   registration failure. The bridge now answers the metadata at BOTH forms.
+
+- **Dynamic Client Registration response now echoes the registered metadata.**
+  The stub returned only a `client_id` (plus a fixed auth method and grant/response
+  types). A strict client validates that the `redirect_uris` it registered come
+  back and abandons a registration that drops them — a plausible cause of the same
+  "couldn't register" failure, independent of the discovery gap above. `register`
+  now reflects the client's `redirect_uris`, `token_endpoint_auth_method`,
+  `grant_types`, `response_types` and `client_name`, and adds `client_id_issued_at`
+  / `client_id_expires_at: 0` (RFC 7591 §3.2.1). Echoing AUTHORIZES nothing: the
+  bridge still stores no client, and `authorize`/`token` check every `redirect_uri`
+  against the host allowlist independently, so a value reflected here is not thereby
+  permitted.
 
 ### Added
 

@@ -530,6 +530,20 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       expect(@result.fetch("register_status")).to eq(201)
       expect(@result.fetch("register")["client_id"]).to be_a(String).and be_present
     end
+
+    # RFC 7591 §3.2.1: a strict client validates that the redirect_uris it
+    # registered come back, and abandons a registration that drops them. Echoing
+    # them registers nothing — the allowlist still gates authorize/token — but a
+    # client that requires the echo can now complete registration.
+    it "echoes the submitted redirect_uris and RFC 7591 client fields" do
+      register = @result.fetch("register")
+
+      expect(register["redirect_uris"]).to eq(["https://client.example/callback"])
+      expect(register["client_id_expires_at"]).to eq(0)
+      expect(register["client_id_issued_at"]).to be_a(Integer)
+      expect(register["grant_types"]).to eq(["authorization_code"])
+      expect(register["response_types"]).to eq(["code"])
+    end
   end
 
   describe "the authorization page" do

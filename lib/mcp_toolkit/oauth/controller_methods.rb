@@ -93,15 +93,28 @@ module McpToolkit::Oauth::ControllerMethods
     }
   end
 
-  # Stateless: persisting a `client_id` nothing reads would only grow a table of
-  # strings the bridge never consults.
+  # Stateless: nothing here is persisted (no endpoint reads a `client_id`). The
+  # response nonetheless echoes the client's own submitted metadata, as RFC 7591
+  # §3.2.1 describes a registration response — a strict client validates that the
+  # `redirect_uris` it registered come back and abandons a registration that drops
+  # them (the failure a hosted client hit against the pre-0.6.1 stub, which
+  # returned only a `client_id`). Echoing AUTHORIZES nothing: `authorize`/`token`
+  # still check every `redirect_uri` against the host's allowlist independently, so
+  # a value reflected here is not thereby permitted. The auth method and the
+  # grant/response types are reflected for the same compatibility reason; the token
+  # endpoint accepts only `authorization_code` whatever is echoed.
   def register
-    render json: {
+    body = {
       client_id: SecureRandom.uuid,
-      token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code"],
-      response_types: ["code"]
-    }, status: :created
+      client_id_issued_at: Time.now.to_i,
+      client_id_expires_at: 0,
+      redirect_uris: mcp_oauth_param_list(:redirect_uris),
+      token_endpoint_auth_method: params[:token_endpoint_auth_method].presence&.to_s || "none",
+      grant_types: mcp_oauth_param_list(:grant_types).presence || ["authorization_code"],
+      response_types: mcp_oauth_param_list(:response_types).presence || ["code"]
+    }
+    body[:client_name] = params[:client_name].to_s if params[:client_name].present?
+    render json: body, status: :created
   end
 
   # `formats: [:html]` because there is only an HTML template and `Accept` picks
@@ -149,6 +162,12 @@ module McpToolkit::Oauth::ControllerMethods
 
   def mcp_oauth_config
     McpToolkit.config
+  end
+
+  # A registration parameter as a plain array of strings — RFC 7591 lists arrive
+  # as JSON arrays; empty when the client sent none.
+  def mcp_oauth_param_list(key)
+    Array(params[key]).map(&:to_s)
   end
 
   # ---- request validation ---------------------------------------------------

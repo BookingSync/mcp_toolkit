@@ -210,6 +210,42 @@ RSpec.describe McpToolkit::Oauth::ControllerMethods do
 
       expect(controller.rendered[:options][:json][:client_id]).not_to eq(first)
     end
+
+    # RFC 7591 §3.2.1: a strict client validates that the redirect_uris it sent
+    # come back, and abandons a registration that drops them. Echoing them
+    # authorizes nothing — authorize/token still gate every redirect_uri against
+    # the allowlist (see the #authorize examples below).
+    it "echoes the submitted redirect_uris and client metadata" do
+      controller.params = {
+        redirect_uris: [redirect_uri],
+        grant_types: %w[authorization_code refresh_token],
+        response_types: ["code"],
+        token_endpoint_auth_method: "client_secret_post",
+        client_name: "Some Client"
+      }
+      controller.register
+
+      expect(controller.rendered[:options][:json]).to include(
+        redirect_uris: [redirect_uri],
+        grant_types: %w[authorization_code refresh_token],
+        response_types: ["code"],
+        token_endpoint_auth_method: "client_secret_post",
+        client_name: "Some Client",
+        client_id_expires_at: 0
+      )
+      expect(controller.rendered[:options][:json][:client_id_issued_at]).to be_a(Integer)
+    end
+
+    it "defaults the grant/response types and auth method when the client sends none" do
+      controller.register
+
+      expect(controller.rendered[:options][:json]).to include(
+        redirect_uris: [],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none"
+      )
+    end
   end
 
   describe "#authorize" do
