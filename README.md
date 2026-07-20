@@ -244,6 +244,98 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 
 ---
 
+## Reading data: pagination, sparse fieldsets, filters
+
+The four generic tools serve the same grammar on both the satellite and authority
+paths (they share the executors). `list` accepts:
+
+| Argument | Shape | Notes |
+|---|---|---|
+| `resource` | String | the registered resource name |
+| `limit` / `offset` | Integer | page size (default 25, max 100) / offset (default 0) |
+| `fields` | Array or comma-separated String | sparse fieldset — attribute and/or relationship names, one flat namespace. Unknown names raise `InvalidParams` rather than being silently dropped |
+| `filter` | Object | per-attribute filters, applied **on top of** the account scope (they can only narrow, never widen) |
+| *(resource-specific)* | — | a resource's own `filter` declarations arrive as **top-level** arguments, not inside `filter` |
+
+`list` returns `{ "<resource>": [...], "meta": { total_count, limit, offset } }`.
+
+Clients discover all of this at runtime: `resources` lists each resource with
+`filterable` and its usage `note`, and `resource_schema` advertises every
+attribute's type and accepted `operators`, the valid `fields` values, the
+resource's own `resource_filters`, and any companion-key requirements.
+
+### Filter values
+
+A filter value is either a **bare value** or an `{ op:, value: }` condition.
+
+```jsonc
+{ "filter": { "status": "active" } }                    // equality
+{ "filter": { "status": "active,archived" } }           // IN set (comma-separated)
+{ "filter": { "status": ["active", "archived"] } }      // IN set (array)
+{ "filter": { "archived_at": "null" } }                 // IS NULL ("null" token, or a JSON null)
+{ "filter": { "created_at": { "op": "gteq", "value": "2026-01-01" } } }
+{ "filter": { "created_at": [                           // conditions AND together
+    { "op": "gteq", "value": "2026-01-01" },
+    { "op": "lt",   "value": "2026-02-01" }
+] } }
+```
+
+Under the default `:tokenized` semantics a bare `""` means "no filter", and a
+comma splits an IN set. Set `bare_filter_value_semantics = :literal` to match
+bare values verbatim instead; operator conditions behave identically in both.
+
+### Operators by column type
+
+`resource_schema` advertises these per attribute; `filter_operator_overrides`
+narrows them per type.
+
+| Column type | Operators |
+|---|---|
+| `integer` / `float` / `decimal` / `datetime` | `eq` `not_eq` `gt` `gteq` `lt` `lteq` |
+| `date` | `eq` `not_eq` `gt` `gteq` `lt` `lteq` `in` |
+| `string` / `text` | `eq` `in` `not_eq` `matches` `does_not_match` |
+| `boolean` | `eq` `not_eq` |
+| anything else (`uuid`, `enum`, `jsonb`, `citext`, …) | `eq` `in` |
+
+`matches` / `does_not_match` are SQL `LIKE`, with wildcards in the value escaped
+by `config.sql_sanitizer`. Only `eq` / `in` / `not_eq` accept a null (`IS NULL` /
+`IS NOT NULL`); a comparison or `LIKE` against null raises `InvalidParams`,
+because it could never match a row. IN-set elements must be non-null scalars —
+SQL `IN` cannot match NULL, so a null-or-nothing condition is expressed as the
+filter's single scalar value.
+
+These refusals are deliberate: each previously returned a silently wrong or empty
+result, which is far harder for a client to notice than an error.
+
+### Resource-specific filters and companion keys
+
+`filterable` maps public filter keys onto backing columns. When the generic
+equality/operator grammar cannot express a filter, declare a `filter` block —
+it takes a **top-level** request param and narrows the relation itself:
+
+```ruby
+filterable status: :status, owner_id: :owner_id
+
+filter :for_project, type: :integer, description: "Only widgets in this project" do |relation, id|
+  relation.joins(:board).where(boards: { project_id: id })
+end
+```
+
+`filter_requirements` declares that a key is meaningless alone — a polymorphic
+foreign key is type-ambiguous without its `*_type`, so filtering on it alone
+would silently match rows across types:
+
+```ruby
+filter_requirements subject_id: :subject_type
+```
+
+`list` then rejects `subject_id` unless `subject_type` comes with it, and
+`resource_schema` advertises the requirement under the relationship's
+`filter.requires` so a client can satisfy it without guessing. Both accept a Hash
+or a lazily-resolved callable.
+
+---
+
 ## Configuration reference
 
 | Setting | Default | Purpose |
@@ -262,9 +354,11 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `session_ttl` | `3600` | session sliding TTL (s) |
 | `protocol_version` | `nil` (negotiate) | pin an MCP protocol version (satellite/upstream client) |
 | `supported_protocol_versions` | `Protocol::SUPPORTED_VERSIONS` | version set the authority dispatcher negotiates |
-| `tool_provider` | `nil` | authority: the host's api-agnostic tool catalog (see below) |
+| `tool_provider` | composed (see below) | authority: the host's api-agnostic tool catalog. Left **unset it composes itself** — the generic `RegistryToolProvider` (only when resources are registered) followed by every `extra_tool_providers` entry — so the common case needs no provider plumbing. Assign explicitly to take full control |
+| `extra_tool_providers` | `[]` | authority: extra providers (or bare tool **classes**, auto-wrapped in a `SingleToolProvider`) composed after the generic tools when `tool_provider` is unset |
 | `generic_tool_name_prefix` | `""` | authority: prefix namespacing the four generic Registry-backed tools (e.g. `"foo_"` → `foo_resources` …) |
 | `rate_limiter` / `usage_recorder` / `usage_flusher` | `nil` | authority transport billing hooks (config callables) |
+| `session_data_builder` | `nil` | authority: builds the opaque `Session#data` payload (e.g. bind a session to a token id so revoking the token kills it) |
 | `rate_limit_max_requests` | `nil` (off) | authority: per-principal request cap for the built-in `RateLimiter`; `nil` disables rate limiting |
 | `rate_limit_window` | `3600` | authority: fixed rate-limit window (s); ignored while `rate_limit_max_requests` is `nil` |
 | `superuser_resolver` | `nil` | optional `->(principal) -> Boolean` for `Context#superuser?`; `nil` = duck-type `principal.superuser?` |
@@ -276,13 +370,48 @@ discovery tool, a custom serializer may also expose `declared_attributes` /
 | `upstream_list_ttl` | `900` | gateway: TTL (s) for an upstream's cached tool list |
 | `logger` | `nil` | optional logger for gateway/session diagnostics (`Rails.logger`) |
 
+### Data path, filtering, and safety caps
+
+These govern how `list` reads a filter and how much work one request may ask for.
+The defaults are the gem's own grammar; the first three exist so a host migrating
+an **existing** MCP endpoint onto the gem can preserve its pre-gem contract
+byte-for-byte (see [Migrating an existing endpoint](#migrating-an-existing-mcp-endpoint)).
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `bare_filter_value_semantics` | `:tokenized` | how a **bare** filter value is read. `:tokenized` applies the comma/IN/`"null"` grammar below; `:literal` sends the value to the WHERE clause verbatim (`"a,b"` is one string, `"null"` is the literal string). Operator conditions are identical either way |
+| `non_numeric_pk_order` | `:created_at` | ordering for non-numeric-PK resources. `:created_at` (with the PK as tiebreaker, so offset pagination is a total order) or `:primary_key` to preserve an `ORDER BY id` contract |
+| `filter_operator_overrides` | `{}` | per-column-type overrides of the advertised **and** enforced operator sets, e.g. `{ text: %w[eq in], date: %w[eq in] }`. Single source, so `resource_schema` and the executor cannot disagree. Rejects, at assignment, any operator outside `Filtering::AREL_PREDICATIONS` |
+| `max_filter_values` | `500` | caps how many values one IN-set may resolve to, and how many operator conditions may be ANDed on one attribute, so a valid token cannot emit an unbounded IN clause / AND-chain. `nil` disables |
+| `max_batch_size` | `50` | authority: caps the JSON-RPC calls one POST batch may carry. Rate limiting is per-HTTP-request, so an uncapped batch would fan out unbounded work under a single tick. `nil` disables |
+| `sql_sanitizer` | `McpToolkit::SqlSanitizer` | escapes LIKE wildcards in `matches` / `does_not_match`; injectable so a non-Rails host can supply its own |
+
+### OAuth bridge (authority-only, opt-in)
+
+All inert unless the bridge is switched on — see
+[OAuth authorization bridge](#oauth-authorization-bridge-authority-only-opt-in)
+for what it is and why the redirect policy is shaped the way it is.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `oauth_allowed_redirect_uris` | `[]` | exact-string allowlist of redirect targets. Validated at assignment (an unparseable, scheme-less, fragment-bearing or opaque URI raises, as does cleartext `http://` to a remote host and the `javascript:`/`data:`/`file:` schemes) and **frozen** once assigned |
+| `oauth_allow_loopback_redirects` | `false` | accept `http://127.0.0.1:*` / `localhost` / `[::1]` without an allowlist entry (RFC 8252 §7.3 — the client picks an ephemeral port, so no list could name it) |
+| `oauth_resource_path` | `"/mcp"` | must match the engine's mount point; `"/"` when the MCP endpoint IS the origin root |
+| `oauth_authorization_code_ttl` | `60` | authorization-code lifetime (s) |
+| `oauth_signing_secret` | Rails' `secret_key_base` | mixed into the key that seals a code's cache entry, so the cache, the logs and the code together still open nothing. Validated at assignment |
+| `oauth_parent_controller` | `"ActionController::Base"` | superclass of the bridge's controller, deliberately **separate** from `parent_controller` — the authorization page is HTML and `ActionController::API` cannot render it |
+
+Either naming a redirect target or enabling loopback is what flips
+`config.oauth_bridge?` on; with neither, no route is drawn.
+
 ## Public API surface
 
 - `McpToolkit.configure { |c| ... }`, `McpToolkit.config`, `McpToolkit.registry`,
   `McpToolkit.reset_config!`
 - `McpToolkit::Registry#register(name) { ... }` (DSL: `model`, `serializer`,
   `scope`, `description`, `note`, `filterable`, `filter(name, type:, description:,
-  &applier)`, `superusers_only!`, `required_permissions_scope`) +
+  &applier)`, `filter_requirements`, `superusers_only!`,
+  `required_permissions_scope`, `extra(key, value)` for host-defined metadata) +
   `#default_required_permissions_scope`
 - `McpToolkit::Serializer::Base` (DSL: `attributes`, `has_one`, `has_many`,
   `translates`)
@@ -340,6 +469,18 @@ McpToolkit.configure do |c|
   c.register_upstream(key: "notifications", url: ENV["NOTIFICATIONS_SERVER_URL"])
   c.register_upstream(key: "billing",       url: ENV["BILLING_SERVER_URL"])
 end
+```
+
+Declaring the whole set from ENV has two gotchas every gateway host rediscovers —
+re-registering on a code reload duplicates entries, and a blank ENV var must not
+become an upstream. `register_upstreams_from_env` handles both (it resets the
+registry first, so it is idempotent, and skips blank urls):
+
+```ruby
+c.register_upstreams_from_env(
+  "notifications" => "NOTIFICATIONS_SERVER_URL",
+  "billing"       => "BILLING_SERVER_URL"
+)
 ```
 
 ### Aggregate upstream tool lists
@@ -660,10 +801,16 @@ McpToolkit.configure do |c|
     note "Read-only projection; do not interpret status codes without domain context."
     scope { |account| Widget.where(account_id: account.id) }
   end
-
-  # The generic tools, served over config.registry:
-  c.tool_provider = McpToolkit::Authority::RegistryToolProvider.new(config: c)
 end
+```
+
+That is the whole setup — **no `tool_provider` assignment is needed.** Left unset,
+it composes itself from the registry (plus any `extra_tool_providers`), so
+registering resources is enough to serve the generic tools. Assign one explicitly
+only to take full control of the catalog:
+
+```ruby
+c.tool_provider = McpToolkit::Authority::RegistryToolProvider.new(config: c)
 ```
 
 Each generic tool resolves the `resource` argument against the registry, refuses a
@@ -685,8 +832,16 @@ c.generic_tool_name_prefix = "foo_"   # advertised + resolved as foo_resources,
 The prefix applies only to these four generic tools; a composed bespoke provider's
 own tool names are unaffected.
 
-To serve the generic tools **and** your own bespoke tools behind one provider,
-compose them:
+To serve the generic tools **and** your own bespoke tools, just name the extras —
+they are composed after the generic ones, and a bare tool **class** is wrapped for
+you:
+
+```ruby
+c.extra_tool_providers = [MyApp::Tools::AuditLog]   # a class, or a provider object
+```
+
+Compose by hand only when you want to control the order or drop the generic tools
+entirely:
 
 ```ruby
 c.tool_provider = McpToolkit::Authority::CompositeToolProvider.new(
@@ -743,6 +898,27 @@ it to gate `superusers_only!` resources; with no resolver it duck-types
 
 Point your `POST /mcp` route at the subclass (or mount the engine for a pure host);
 keep `POST /mcp/tokens/introspect` on the gem's `TokensController`.
+
+### Migrating an existing MCP endpoint
+
+If you are moving an MCP endpoint you already ship onto the gem, your clients
+hold the *old* contract. Several seams exist purely so that contract survives the
+move — adopt them at first, then retire them deliberately rather than breaking
+clients on cutover:
+
+| If your endpoint… | Set |
+|---|---|
+| matched bare filter values verbatim (no comma/`"null"` grammar) | `bare_filter_value_semantics = :literal` |
+| ordered non-numeric-PK lists by `id` | `non_numeric_pk_order = :primary_key` |
+| advertised a narrower operator set | `filter_operator_overrides`, e.g. `{ text: %w[eq in], date: %w[eq in] }` |
+| namespaced its generic tool names | `generic_tool_name_prefix` |
+| filtered a polymorphic FK safely | `filter_requirements` on the resource |
+
+One deliberate delta is **not** revertible: `{ op: "in", value: "a,b" }` now
+splits into an IN set (previously only `eq` split, and `in` matched the literal
+string `'a,b'`). Under the tokenized operator grammar there is no way to express
+a literal comma inside an IN element — express such a match as a bare equality
+value, which `:literal` semantics match verbatim.
 
 ### Lazy `parent_controller`
 
