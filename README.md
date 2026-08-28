@@ -493,6 +493,25 @@ So **every target must be named by exact string**, with exactly one exception:
 | Private-use scheme (`cursor://…`, `com.example.app:/cb`) | Exact string, in `oauth_allowed_redirect_uris` | Keeps the code on the device, but its URI is a fixed string — so just name it. |
 | Loopback (`http://127.0.0.1:*`, `localhost`, `[::1]`) | `oauth_allow_loopback_redirects` | The only target that **cannot** be named: the client picks an ephemeral port at runtime (RFC 8252 §7.3). And it resolves on the operator's own machine, so the attack above cannot reach it. |
 
+### If a client's callback looks impossible to name, check RFC 9207 first
+
+Some hosted clients mint a **per-connector** callback (`https://vendor.example/connector/oauth/{id}`),
+which no exact-match list can express — and the obvious response, matching the
+host and path by pattern, is the wrong one. A prefix turns an attacker into
+someone who can **name their own destination inside it**: they create their own
+connector at that vendor, put their callback in the authorize URL, and the code
+goes somewhere they control. Exact matching leaves a weaker residual (a code sent
+to the vendor's *legitimate* shared callback, separated by the client binding
+`state` to the initiating session — RFC 6819 §4.4.1.7); a prefix removes the need
+for any of that to go wrong.
+
+At least one such client picks the per-connector form **only when the
+authorization server does not implement RFC 9207**, and uses a single stable
+callback when it does. Since 0.6.2 this gem implements it, so the fix for that
+class of failure is to be conforming, not to be permissive. Before relaxing the
+policy for a client that "cannot be named", check whether it is asking you for a
+capability instead.
+
 The loopback exception exists because an allowlist entry is *impossible* there,
 not because native clients are trusted. A private-use scheme keeps the code on the
 device too, but nothing forces it to be unnamed — and whole **schemes** cannot be

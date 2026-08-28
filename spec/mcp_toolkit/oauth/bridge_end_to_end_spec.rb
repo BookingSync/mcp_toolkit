@@ -215,6 +215,7 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     result["approve_location_host"] = location && location.split("?").first
     code = location && Rack::Utils.parse_query(URI.parse(location).query)["code"]
     result["approve_state"] = location && Rack::Utils.parse_query(URI.parse(location).query)["state"]
+    result["approve_iss"] = location && Rack::Utils.parse_query(URI.parse(location).query)["iss"]
 
     # 6b. A bad paste must not issue a code.
     session.post("/mcp/oauth/authorize", authorize_query.merge(access_token: "wrong-token"))
@@ -304,12 +305,13 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
 
     # 12. A loopback client controls its own query, so it can pass `?code=`. The
     # response owns that parameter — ours must be the only one.
-    polluted = "http://127.0.0.1:54321/cb?code=ATTACKER&tenant=acme"
+    polluted = "http://127.0.0.1:54321/cb?code=ATTACKER&iss=https://attacker.example&tenant=acme"
     session.post("/mcp/oauth/authorize",
                  authorize_query.merge(redirect_uri: polluted, access_token: VALID_TOKEN))
     polluted_location = session.last_response.headers["Location"]
     polluted_query = Rack::Utils.parse_query(URI.parse(polluted_location.to_s).query)
     result["polluted_code_values"] = Array(polluted_query["code"])
+    result["polluted_iss_values"] = Array(polluted_query["iss"])
     result["polluted_keeps_client_query"] = polluted_query["tenant"]
 
     puts JSON.generate(result)
@@ -438,6 +440,16 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       expect(codes.first).not_to eq("ATTACKER")
       expect(@result.fetch("polluted_keeps_client_query")).to eq("acme")
     end
+
+    # A seeded `iss` is the one that matters most: RFC 9207 exists so a client can
+    # tell which authorization server answered, and a caller-supplied value would
+    # let the caller answer that question instead of us.
+    it "emits exactly one iss, ours, over a caller-seeded one" do
+      values = @result.fetch("polluted_iss_values")
+
+      expect(values.size).to eq(1)
+      expect(values.first).to eq("http://example.org/mcp")
+    end
   end
 
   # RFC 6749 §5.1 (both headers on a token response) and RFC 9700 §4.12 (303 after
@@ -489,7 +501,8 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
         "issuer" => "http://example.org/mcp",
         "authorization_endpoint" => "http://example.org/mcp/oauth/authorize",
         "token_endpoint" => "http://example.org/mcp/oauth/token",
-        "code_challenge_methods_supported" => ["S256"]
+        "code_challenge_methods_supported" => ["S256"],
+        "authorization_response_iss_parameter_supported" => true
       )
     end
 
@@ -509,7 +522,8 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
         "issuer" => "http://example.org/mcp",
         "authorization_endpoint" => "http://example.org/mcp/oauth/authorize",
         "token_endpoint" => "http://example.org/mcp/oauth/token",
-        "registration_endpoint" => "http://example.org/mcp/oauth/register"
+        "registration_endpoint" => "http://example.org/mcp/oauth/register",
+        "authorization_response_iss_parameter_supported" => true
       )
       expect(@result.fetch("appended_as_cache_control")).to eq("no-store")
     end
@@ -592,6 +606,18 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
     it "does not redirect (or issue a code) for a token that does not authenticate" do
       expect(@result.fetch("approve_bad_token_status")).to eq(422)
       expect(@result.fetch("approve_bad_token_redirected")).to be(false)
+    end
+
+    # RFC 9207 §2. The value is useless unless a client can match it against the
+    # metadata by EXACT STRING — no normalising of trailing slashes, paths, ports
+    # or casing — so this pins the redirect against the discovery document the
+    # client actually read, rather than against a literal. Both derive from
+    # `request.base_url`, which honours X-Forwarded-Host: if that ever makes them
+    # disagree, they disagree HERE and not in a customer's connector.
+    it "carries an iss that byte-matches the advertised issuer" do
+      expect(@result.fetch("approve_iss")).to eq(@result.fetch("as").fetch("issuer"))
+      expect(@result.fetch("approve_iss")).to eq(@result.fetch("appended_as").fetch("issuer"))
+      expect(@result.fetch("approve_iss")).to eq(@result.fetch("prm").fetch("authorization_servers").first)
     end
   end
 
