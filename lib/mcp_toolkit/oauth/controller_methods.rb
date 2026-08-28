@@ -31,7 +31,7 @@ module McpToolkit::Oauth::ControllerMethods
 
   # Query parameters the callback response owns: whatever a client put in its own
   # redirect_uri, these are set by the redirect and not carried over from it.
-  RESPONSE_OWNED_QUERY_KEYS = %w[code state].freeze
+  RESPONSE_OWNED_QUERY_KEYS = %w[code state iss].freeze
 
   # RFC 7636 §4.1: 43–128 unreserved characters. The challenge is §4.2's
   # base64url of a SHA-256, which is always exactly 43 of the same alphabet.
@@ -95,7 +95,8 @@ module McpToolkit::Oauth::ControllerMethods
       response_types_supported: SUPPORTED_RESPONSE_TYPES,
       grant_types_supported: SUPPORTED_GRANT_TYPES,
       code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: ["none"]
+      token_endpoint_auth_methods_supported: ["none"],
+      authorization_response_iss_parameter_supported: true
     }
   end
 
@@ -408,6 +409,7 @@ module McpToolkit::Oauth::ControllerMethods
     pairs = mcp_oauth_preserved_query_pairs(existing)
     pairs << ["code", code]
     pairs << ["state", params[:state].to_s] if params[:state].present?
+    pairs << ["iss", mcp_oauth_issuer]
     "#{base}?#{URI.encode_www_form(pairs)}"
   end
 

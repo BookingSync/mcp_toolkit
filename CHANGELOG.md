@@ -1,3 +1,43 @@
+## [0.6.2] - 2026-08-28
+
+RFC 9207 authorization server issuer identification. Additive hardening, and the
+fix for hosted clients that choose their redirect URI based on whether the
+authorization server supports it.
+
+### Added
+
+- **`iss` in the authorization response, and `authorization_response_iss_parameter_supported`
+  in the metadata** (RFC 9207). The parameter names which authorization server
+  produced a response, so a client registered with several cannot be induced to
+  redeem a code at the wrong one — the mixed-up authorization server attack.
+
+  This also unblocks **ChatGPT connectors**, which pick their `redirect_uri` from
+  whether the server meets RFC 9207: when it does, ChatGPT uses the stable
+  `https://chatgpt.com/connector_platform_oauth_redirect`; when it does not, it
+  mints a per-connector `https://chatgpt.com/connector/oauth/{callback_id}` that
+  no exact-match allowlist can express, and the connection fails with an
+  unregistered `redirect_uri`. Observed in production against a real customer
+  before this release.
+
+  Note for hosts: a client that picks its callback at *connector-creation* time
+  reads the metadata then. An existing connector created against a pre-0.6.2
+  server keeps the URI it already chose — **it has to be re-created** to pick up
+  the change.
+
+  `iss` is emitted on the one response this bridge redirects (`approve`); every
+  error path renders rather than redirecting, so there is no error response for it
+  to be absent from. It is byte-identical to the advertised `issuer` — clients
+  compare by exact string and do not normalise trailing slashes, paths, ports or
+  casing — and a spec pins the redirect against the discovery document rather than
+  against a literal.
+
+  `iss` is now response-owned alongside `code` and `state`: a caller that seeds one
+  into its own `redirect_uri` has it replaced, not appended. A value the caller
+  chose would defeat the point of the parameter.
+
+  **No control was relaxed.** The redirect allowlist is unchanged and still exact-match
+  (RFC 9700 §2.1); this release makes conforming clients ask for a URI already on it.
+
 ## [0.6.1] - 2026-07-20
 
 Two additive fixes for hosted MCP clients whose OAuth setup could not complete
