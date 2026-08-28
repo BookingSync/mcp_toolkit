@@ -432,7 +432,7 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
 
   # A loopback redirect_uri is not exact-matched, so its query is the caller's to
   # choose. The parameters this response owns are not.
-  describe "a loopback redirect_uri carrying its own code" do
+  describe "a loopback redirect_uri carrying its own response parameters" do
     it "emits exactly one code, ours, and keeps the client's own query" do
       codes = @result.fetch("polluted_code_values")
 
@@ -441,9 +441,6 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       expect(@result.fetch("polluted_keeps_client_query")).to eq("acme")
     end
 
-    # A seeded `iss` is the one that matters most: RFC 9207 exists so a client can
-    # tell which authorization server answered, and a caller-supplied value would
-    # let the caller answer that question instead of us.
     it "emits exactly one iss, ours, over a caller-seeded one" do
       values = @result.fetch("polluted_iss_values")
 
@@ -608,12 +605,8 @@ RSpec.describe "OAuth bridge end to end", if: rails_available do
       expect(@result.fetch("approve_bad_token_redirected")).to be(false)
     end
 
-    # RFC 9207 §2. The value is useless unless a client can match it against the
-    # metadata by EXACT STRING — no normalising of trailing slashes, paths, ports
-    # or casing — so this pins the redirect against the discovery document the
-    # client actually read, rather than against a literal. Both derive from
-    # `request.base_url`, which honours X-Forwarded-Host: if that ever makes them
-    # disagree, they disagree HERE and not in a customer's connector.
+    # Compared against the document, not a literal: both derive from
+    # `request.base_url`, so X-Forwarded-Host divergence has to fail here.
     it "carries an iss that byte-matches the advertised issuer" do
       expect(@result.fetch("approve_iss")).to eq(@result.fetch("as").fetch("issuer"))
       expect(@result.fetch("approve_iss")).to eq(@result.fetch("appended_as").fetch("issuer"))

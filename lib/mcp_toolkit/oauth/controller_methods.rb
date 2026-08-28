@@ -31,9 +31,6 @@ module McpToolkit::Oauth::ControllerMethods
 
   # Query parameters the callback response owns: whatever a client put in its own
   # redirect_uri, these are set by the redirect and not carried over from it.
-  # `iss` is here for the same reason as `code`: RFC 9207 exists so a client can
-  # tell WHICH authorization server answered, which it cannot do if the value is
-  # one the caller seeded into its own redirect_uri.
   RESPONSE_OWNED_QUERY_KEYS = %w[code state iss].freeze
 
   # RFC 7636 §4.1: 43–128 unreserved characters. The challenge is §4.2's
@@ -406,18 +403,6 @@ module McpToolkit::Oauth::ControllerMethods
   # `URI`, so the host part of what is emitted is byte-identical to what the
   # policy approved. The query IS re-encoded (`?a=1?b=2` normalises to
   # `?a=1%3Fb%3D2`), which is the point — that is where `code` gets stripped.
-  # `iss` is RFC 9207 issuer identification: it names which authorization server
-  # produced this response, so a client registered with several cannot be tricked
-  # into redeeming a code at the wrong one (mixed-up authorization server). It is
-  # emitted unconditionally — RFC 9207 §2 makes it a MUST for every authorization
-  # response sent to the redirect_uri, and `approve` is the only one this bridge
-  # sends: every error path renders (400/422) rather than redirecting, so there is
-  # no error response for it to be absent from.
-  #
-  # It MUST be byte-identical to the `issuer` in the authorization server metadata
-  # — clients compare by exact string and do not normalise trailing slashes,
-  # paths, ports or casing. Both come from `mcp_oauth_issuer` for that reason, and
-  # a spec pins them against each other.
   def mcp_oauth_callback_url(code)
     redirect_uri = params[:redirect_uri].to_s
     base, _, existing = redirect_uri.partition("?")
